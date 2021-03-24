@@ -162,7 +162,6 @@ class Parser {
                 case PRINT:
                 case RETURN:
                     return;
-                default: // Keep going in the loop if we haven't found the start of a statement
             }
         }
 
