@@ -43,7 +43,7 @@ class Scanner {
 
     List<Token> scanTokens() {
         // Continously add tokens until we reach the end of file.
-        while(!consumedAllChars()) {
+        while (!consumedAllChars()) {
             start = current;
             scanToken();
         }
