@@ -116,7 +116,9 @@ class Resolver implements Expr.Visitor<Void>, Stmt.Visitor<Void> {
         }
 
         if (stmt.value != null) {
-            Lox.error(stmt.keyword, "Can't return a value from an initializer.");
+            if (currentFunction == FunctionType.INITIALIZER) {
+                Lox.error(stmt.keyword, "Can't return a value from an initializer.");
+            }
 
             resolve(stmt.value);
         }
