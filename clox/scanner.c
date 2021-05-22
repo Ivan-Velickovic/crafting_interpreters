@@ -33,7 +33,7 @@ static bool isAtEnd() {
 }
 
 static char advance() {
-    *scanner.current++;
+    scanner.current++;
     return scanner.current[-1];
 }
 
