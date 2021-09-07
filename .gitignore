@@ -1,4 +1,6 @@
 *.class
 test.lox
 clox/clox
+zig-cache
+zig-out
 
