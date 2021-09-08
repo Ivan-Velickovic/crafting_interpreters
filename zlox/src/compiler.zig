@@ -52,6 +52,8 @@ const Precedence = enum {
 
 fn getPrecedence(tokenType: TokenType) Precedence {
     return switch (tokenType) {
+        .Or => .Or,
+        .And => .And,
         .Minus, .Plus => .Term,
         .Slash, .Star => .Factor,
         .BangEqual, .EqualEqual => .Equality,
@@ -206,6 +208,26 @@ const Parser = struct {
         try self.emitByte(byte);
     }
 
+    fn emitJump(self: *Parser, op: OpCode) !usize {
+        try self.emitOp(op);
+        try self.emitByte(0xff);
+        try self.emitByte(0xff);
+
+        return self.chunk.code.items.len - 2;
+    }
+
+    fn emitLoop(self: *Parser, loopStart: usize) !void {
+        try self.emitOp(.Loop);
+
+        const offset = self.chunk.code.items.len - loopStart + 2;
+        if (offset > std.math.maxInt(u16)) {
+            try self.errorAtPrevious("Loop body too large.");
+        }
+
+        try self.emitByte(@intCast(u8, (offset >> 8) & 0xff));
+        try self.emitByte(@intCast(u8, offset & 0xff));
+    }
+
     fn emitReturn(self: *Parser) !void {
         try self.emitOp(.Return);
     }
@@ -222,6 +244,18 @@ const Parser = struct {
 
     fn emitConstant(self: *Parser, value: Value) !void {
         try self.emitUnaryOp(.Constant, try self.makeConstant(value));
+    }
+
+    fn patchJump(self: *Parser, offset: usize) !void {
+        // We minus 2 for the bytecode for the jump offset.
+        const jump = self.chunk.code.items.len - offset - 2;
+
+        if (jump > std.math.maxInt(u16)) {
+            try self.errorAtPrevious("Too much code to jump over.");
+        }
+
+        self.chunk.code.items[offset] = @intCast(u8, (jump >> 8) & 0xff);
+        self.chunk.code.items[offset + 1] = @intCast(u8, jump & 0xff);
     }
 
     fn stringValue(self: *Parser, chars: []const u8) !Value {
@@ -326,6 +360,17 @@ const Parser = struct {
         }
     }
 
+    fn or_(self: *Parser) !void {
+        const elseJump = try self.emitJump(.JumpIfFalse);
+        const endJump = try self.emitJump(.Jump);
+
+        try self.patchJump(elseJump);
+        try self.emitOp(.Pop);
+
+        try self.parsePrecedence(.Or);
+        try self.patchJump(endJump);
+    }
+
     fn string(self: *Parser) !void {
         // Trim leading and trailing quotation marks.
         const stringToCopy = self.previous.lexeme[1 .. self.previous.lexeme.len - 1];
@@ -392,6 +437,8 @@ const Parser = struct {
 
     fn infix(self: *Parser, tokenType: TokenType, canAssign: bool) !void {
         switch (tokenType) {
+            .Or => try self.or_(),
+            .And => try self.and_(),
             .Minus, .Plus,
             .Slash, .Star,
             .BangEqual, .EqualEqual,
@@ -442,6 +489,15 @@ const Parser = struct {
         try self.emitUnaryOp(.DefineGlobal, global);
     }
 
+    fn and_(self: *Parser) !void {
+        const endJump = try self.emitJump(.JumpIfFalse);
+
+        try self.emitOp(.Pop);
+        try self.parsePrecedence(.And);
+
+        try self.patchJump(endJump);
+    }
+
     fn expression(self: *Parser) !void {
         try self.parsePrecedence(.Assignment);
     }
@@ -473,10 +529,90 @@ const Parser = struct {
         try self.emitOp(.Pop);
     }
 
+    fn forStatement(self: *Parser) !void {
+        self.beginScope();
+
+        try self.consume(.LeftParen, "Expect '(' after 'for'.");
+        if (try self.match(.Semicolon)) {
+            // No initializer.
+        } else if (try self.match(.Var)) {
+            try self.varDeclaration();
+        } else {
+            try self.expressionStatement();
+        }
+
+        var loopStart = self.chunk.code.items.len;
+        var maybeExitJump: ?usize = null;
+        if (!try self.match(.Semicolon)) {
+            try self.expression();
+            try self.consume(.Semicolon, "Expect ';' after loop condition.");
+
+            // Jump out of the loop if the condition is false.
+            maybeExitJump = @intCast(usize, try self.emitJump(.JumpIfFalse));
+            try self.emitOp(.Pop);
+        }
+
+        if (!try self.match(.RightParen)) {
+            const bodyJump = try self.emitJump(.Jump);
+            const incrementStart = self.chunk.code.items.len;
+            try self.expression();
+            try self.emitOp(.Pop);
+            try self.consume(.RightParen, "Expect ')' after for clauses.");
+
+            try self.emitLoop(loopStart);
+            loopStart = incrementStart;
+            try self.patchJump(bodyJump);
+        }
+
+        try self.statement();
+        try self.emitLoop(loopStart);
+
+        if (maybeExitJump) |exitJump| {
+            try self.patchJump(exitJump);
+            try self.emitOp(.Pop);
+        }
+
+        try self.endScope();
+    }
+
+    fn ifStatement(self: *Parser) !void {
+        try self.consume(.LeftParen, "Expect '(' after 'if'.");
+        try self.expression();
+        try self.consume(.RightParen, "Expect ')' after condition.");
+
+        const thenJump = try self.emitJump(.JumpIfFalse);
+        try self.emitOp(.Pop);
+        try self.statement();
+
+        const elseJump = try self.emitJump(.Jump);
+
+        try self.patchJump(thenJump);
+        try self.emitOp(.Pop);
+
+        if (try self.match(.Else)) try self.statement();
+
+        try self.patchJump(elseJump);
+    }
+
     fn printStatement(self: *Parser) !void {
         try self.expression();
         try self.consume(.Semicolon, "Expect ';' after value.");
         try self.emitOp(.Print);
+    }
+
+    fn whileStatement(self: *Parser) !void {
+        const loopStart = self.chunk.code.items.len;
+        try self.consume(.LeftParen, "Expect '(' after 'while'.");
+        try self.expression();
+        try self.consume(.RightParen, "Expect ')' after condition.");
+
+        const exitJump = try self.emitJump(.JumpIfFalse);
+        try self.emitOp(.Pop);
+        try self.statement();
+        try self.emitLoop(loopStart);
+
+        try self.patchJump(exitJump);
+        try self.emitOp(.Pop);
     }
 
     fn synchronize(self: *Parser) !void {
@@ -502,9 +638,15 @@ const Parser = struct {
         if (self.panicMode) try self.synchronize();
     }
 
-    fn statement(self: *Parser) !void {
+    fn statement(self: *Parser) CompilerError!void {
         if (try self.match(.Print)) {
             try self.printStatement();
+        } else if (try self.match(.For)) {
+            try self.forStatement();
+        } else if (try self.match(.If)) {
+            try self.ifStatement();
+        } else if (try self.match(.While)) {
+            try self.whileStatement();
         } else if (try self.match(.LeftBrace)) {
             self.beginScope();
             try self.block();

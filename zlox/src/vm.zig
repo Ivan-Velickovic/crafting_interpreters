@@ -100,6 +100,14 @@ pub const VM = struct {
         return self.chunk.code.items[self.instructionIndex];
     }
 
+    fn readShort(self: *VM) u16 {
+        self.instructionIndex += 2;
+        var short = @as(u16, self.chunk.code.items[self.instructionIndex - 2]) << 8;
+        short |= self.chunk.code.items[self.instructionIndex - 1];
+
+        return short;
+    }
+
     fn binaryBooleanOp(self: *VM, op: OpCode) !void {
         const rhs = self.stack.pop();
         const lhs = self.stack.pop();
@@ -228,6 +236,18 @@ pub const VM = struct {
                     self.stack.push(Value.fromNumber(-value.Number));
                 },
                 .Print => try stdout.print("{}\n", .{self.stack.pop()}),
+                .Jump => {
+                    const offset = self.readShort();
+                    self.instructionIndex += offset;
+                },
+                .JumpIfFalse => {
+                    const offset = self.readShort();
+                    if (self.peek(0).isFalsey()) self.instructionIndex += offset;
+                },
+                .Loop => {
+                    const offset = self.readShort();
+                    self.instructionIndex -= offset;
+                },
                 // For Return, we simply want to exit the interpreter.
                 .Return => return,
             }

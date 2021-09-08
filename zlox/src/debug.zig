@@ -33,6 +33,17 @@ fn byteInstruction(name: []const u8, chunk: *Chunk, offset: usize) !usize {
     return offset + 2;
 }
 
+fn jumpInstruction(name: []const u8, sign: i8, chunk: *Chunk, offset: usize) !usize {
+    var jump = @as(u16, chunk.code.items[offset + 1]) << 8;
+    jump |= chunk.code.items[offset + 2];
+
+    // Since sign is possibly negative, we have to do these casts, since jumpEnd could be negative.
+    const jumpEnd = @intCast(isize, offset) + 3 + sign * @as(i32, jump);
+    try stdout.print("{s: <16} {d: >4} -> {d}\n", .{ name, offset, jumpEnd });
+
+    return offset + 3;
+}
+
 pub fn disassembleInstruction(chunk: *Chunk, offset: usize) !usize {
     try stdout.print("{d:0>4} ", .{offset});
 
@@ -64,6 +75,9 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize) !usize {
         .Not =>             simpleInstruction("OP_NOT", offset),
         .Negate =>          simpleInstruction("OP_NEGATE", offset),
         .Print =>           simpleInstruction("OP_PRINT", offset),
+        .Jump =>            jumpInstruction("OP_JUMP", 1, chunk, offset),
+        .JumpIfFalse =>     jumpInstruction("OP_JUMP_IF_FALSE", 1, chunk, offset),
+        .Loop =>            jumpInstruction("OP_LOOP", -1, chunk, offset),
         .Return =>          simpleInstruction("OP_RETURN", offset),
     };
 }
