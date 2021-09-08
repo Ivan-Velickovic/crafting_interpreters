@@ -145,8 +145,6 @@ pub const Scanner = struct {
     }
 
     fn checkKeyword(self: *Scanner, startIndex: u8, rest: []const u8, tokenType: TokenType) TokenType {
-        if (self.start.len < startIndex + rest.len) return .Identifier;
-
         const sourceSlice = self.start[startIndex .. startIndex + rest.len];
 
         return if (std.mem.eql(u8, sourceSlice, rest)) tokenType else .Identifier;

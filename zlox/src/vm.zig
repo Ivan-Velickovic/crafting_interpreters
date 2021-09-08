@@ -157,14 +157,21 @@ pub const VM = struct {
                 _ = try debug.disassembleInstruction(&self.chunk, self.instructionIndex);
             }
 
-            const instruction = self.readByte();
-            const code = @intToEnum(OpCode, instruction);
-            switch (code) {
+            const opCode = @intToEnum(OpCode, self.readByte());
+            switch (opCode) {
                 .Constant => self.stack.push(self.readConstant()),
                 .Nil => self.stack.push(Value.nil()),
                 .True => self.stack.push(Value.fromBool(true)),
                 .False => self.stack.push(Value.fromBool(false)),
                 .Pop => _ = self.stack.pop(),
+                .GetLocal => {
+                    const slot = self.readByte();
+                    self.stack.push(self.stack.items[slot]);
+                },
+                .SetLocal => {
+                    const slot = self.readByte();
+                    self.stack.items[slot] = self.peek(0);
+                },
                 .GetGlobal => {
                     const name = self.readString();
                     if (self.globals.get(name)) |value| {
@@ -192,8 +199,8 @@ pub const VM = struct {
                     const lhs = self.stack.pop();
                     self.stack.push(Value.fromBool(Value.isEqual(lhs, rhs)));
                 },
-                .Greater, .Less => try self.binaryBooleanOp(code),
-                .Subtract, .Multiply, .Divide => try self.binaryNumericOp(code),
+                .Greater, .Less => try self.binaryBooleanOp(opCode),
+                .Subtract, .Multiply, .Divide => try self.binaryNumericOp(opCode),
                 .Add => {
                     const rhs = self.stack.pop();
                     const lhs = self.stack.pop();

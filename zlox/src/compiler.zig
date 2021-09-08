@@ -10,7 +10,6 @@ const Scanner = @import("scanner.zig").Scanner;
 const Token = @import("scanner.zig").Token;
 const TokenType = @import("scanner.zig").TokenType;
 const OpCode = @import("chunk.zig").OpCode;
-const maxInt = std.math.maxInt;
 
 // Note that this is only because the Zig compiler (at least in v0.8.0)
 // cannot infer recursive error union types, which becomes apparent
@@ -18,8 +17,9 @@ const maxInt = std.math.maxInt;
 const CompilerError = error{OutOfMemory} || InterpretError || std.os.WriteError;
 
 pub fn compile(vm: *VM, source: []const u8) !void {
-    const scanner = &Scanner.create(source);
-    var parser = Parser.create(scanner, vm);
+    var scanner = Scanner.create(source);
+    var compiler = Compiler.create();
+    var parser = Parser.create(&scanner, &compiler, vm);
 
     try parser.advance();
 
@@ -60,8 +60,30 @@ fn getPrecedence(tokenType: TokenType) Precedence {
     };
 }
 
+const Local = struct {
+    name: []const u8,
+    depth: isize,
+};
+
+const Compiler = struct {
+    const MAX_LOCALS = std.math.maxInt(u8) + 1;
+
+    locals: [MAX_LOCALS]Local,
+    localCount: u16,
+    scopeDepth: u16,
+
+    fn create() Compiler {
+        return Compiler{
+            .locals = undefined,
+            .localCount = 0,
+            .scopeDepth = 0,
+        };
+    }
+};
+
 const Parser = struct {
     scanner: *Scanner,
+    compiler: *Compiler,
     vm: *VM,
     chunk: *Chunk,
     current: Token,
@@ -69,9 +91,10 @@ const Parser = struct {
     hadError: bool,
     panicMode: bool,
 
-    fn create(scanner: *Scanner, vm: *VM) Parser {
+    fn create(scanner: *Scanner, compiler: *Compiler, vm: *VM) Parser {
         return Parser{
             .scanner = scanner,
+            .compiler = compiler,
             .vm = vm,
             .chunk = &vm.chunk,
             .current = undefined,
@@ -87,6 +110,20 @@ const Parser = struct {
         const debugPrintCode = @import("build_options").debugPrintCode;
         if (debugPrintCode and !self.hadError) {
             try debug.disassembleChunk(self.chunk, "code");
+        }
+    }
+
+    fn beginScope(self: *Parser) void {
+        self.compiler.scopeDepth += 1;
+    }
+
+    fn endScope(self: *Parser) !void {
+        self.compiler.scopeDepth -= 1;
+
+        while (self.compiler.localCount > 0
+                and self.compiler.locals[self.compiler.localCount - 1].depth > self.compiler.scopeDepth) {
+            try self.emitOp(.Pop);
+            self.compiler.localCount -= 1;
         }
     }
 
@@ -156,13 +193,26 @@ const Parser = struct {
         try self.emitByte(byte2);
     }
 
+    fn emitOp(self: *Parser, op: OpCode) !void {
+        try self.emitByte(@enumToInt(op));
+    }
+
+    fn emitOps(self: *Parser, op1: OpCode, op2: OpCode) !void {
+        try self.emitBytes(@enumToInt(op1), @enumToInt(op2));
+    }
+
+    fn emitUnaryOp(self: *Parser, op: OpCode, byte: u8) !void {
+        try self.emitOp(op);
+        try self.emitByte(byte);
+    }
+
     fn emitReturn(self: *Parser) !void {
-        try self.emitByte(@enumToInt(OpCode.Return));
+        try self.emitOp(.Return);
     }
 
     fn makeConstant(self: *Parser, value: Value) !u8 {
         const constantIndex = try self.chunk.addConstant(value);
-        if (constantIndex > maxInt(u8)) {
+        if (constantIndex > std.math.maxInt(u8)) {
             try self.errorAtPrevious("Too many constants in one chunk.");
             return 0;
         }
@@ -171,7 +221,7 @@ const Parser = struct {
     }
 
     fn emitConstant(self: *Parser, value: Value) !void {
-        try self.emitBytes(@enumToInt(OpCode.Constant), try self.makeConstant(value));
+        try self.emitUnaryOp(.Constant, try self.makeConstant(value));
     }
 
     fn stringValue(self: *Parser, chars: []const u8) !Value {
@@ -183,31 +233,82 @@ const Parser = struct {
         return try self.makeConstant(try self.stringValue(name));
     }
 
+    fn resolveLocal(self: *Parser, name: []const u8) !isize {
+        if (self.compiler.localCount == 0) return -1;
+
+        var i: usize = self.compiler.localCount - 1;
+        while (i >= 0) : (i -= 1) {
+            const local = self.compiler.locals[i];
+            if (std.mem.eql(u8, name, local.name)) {
+                if (local.depth == -1) {
+                    try self.errorAtPrevious("Can't read local variable in its own initializer.");
+                }
+
+                return @intCast(isize, i);
+            }
+        }
+
+        return -1;
+    }
+
+    fn addLocal(self: *Parser, name: []const u8) !void {
+        if (self.compiler.locals.len == self.compiler.localCount) {
+            try self.errorAtPrevious("Too many local variables in function.");
+            return;
+        }
+
+        self.compiler.locals[self.compiler.localCount] = Local{
+            .name = name,
+            .depth = -1,
+        };
+        self.compiler.localCount += 1;
+    }
+
+    fn declareVariable(self: *Parser) !void {
+        if (self.compiler.scopeDepth == 0) return;
+
+        if (self.compiler.localCount > 0) {
+            // Look for any variables in the same scope that have the same name.
+            // We start from end of the array since that is where the current scope is.
+            var i: isize = self.compiler.localCount - 1;
+            while (i >= 0) : (i -= 1) {
+                const local = &self.compiler.locals[@intCast(usize, i)];
+                if (local.depth != -1 and local.depth < self.compiler.scopeDepth) break;
+
+                if (std.mem.eql(u8, self.previous.lexeme, local.name)) {
+                    try self.errorAtPrevious("Already a variable with this name in this scope.");
+                }
+            }
+        }
+
+        try self.addLocal(self.previous.lexeme);
+    }
+
     fn binary(self: *Parser) !void {
         const operatorType = self.previous.tokenType;
         const precedence = getPrecedence(operatorType);
         try self.parsePrecedence(precedence.next());
 
         switch (operatorType) {
-            .BangEqual =>       try self.emitBytes(@enumToInt(OpCode.Equal), @enumToInt(OpCode.Not)),
-            .EqualEqual =>      try self.emitByte(@enumToInt(OpCode.Equal)),
-            .Greater =>         try self.emitByte(@enumToInt(OpCode.Greater)),
-            .GreaterEqual =>    try self.emitBytes(@enumToInt(OpCode.Less), @enumToInt(OpCode.Not)),
-            .Less =>            try self.emitByte(@enumToInt(OpCode.Less)),
-            .LessEqual =>       try self.emitBytes(@enumToInt(OpCode.Greater), @enumToInt(OpCode.Not)),
-            .Plus =>            try self.emitByte(@enumToInt(OpCode.Add)),
-            .Minus =>           try self.emitByte(@enumToInt(OpCode.Subtract)),
-            .Star =>            try self.emitByte(@enumToInt(OpCode.Multiply)),
-            .Slash =>           try self.emitByte(@enumToInt(OpCode.Divide)),
+            .BangEqual =>       try self.emitOps(.Equal, .Not),
+            .EqualEqual =>      try self.emitOp(.Equal),
+            .Greater =>         try self.emitOp(.Greater),
+            .GreaterEqual =>    try self.emitOps(.Less, .Not),
+            .Less =>            try self.emitOp(.Less),
+            .LessEqual =>       try self.emitOps(.Greater, .Not),
+            .Plus =>            try self.emitOp(.Add),
+            .Minus =>           try self.emitOp(.Subtract),
+            .Star =>            try self.emitOp(.Multiply),
+            .Slash =>           try self.emitOp(.Divide),
             else => unreachable,
         }
     }
 
     fn literal(self: *Parser) !void {
         switch (self.previous.tokenType) {
-            .False => try self.emitByte(@enumToInt(OpCode.False)),
-            .Nil => try self.emitByte(@enumToInt(OpCode.Nil)),
-            .True => try self.emitByte(@enumToInt(OpCode.True)),
+            .False => try self.emitOp(.False),
+            .Nil => try self.emitOp(.Nil),
+            .True => try self.emitOp(.True),
             else => unreachable,
         }
     }
@@ -232,13 +333,26 @@ const Parser = struct {
     }
 
     fn namedVariable(self: *Parser, name: []const u8, canAssign: bool) !void {
-        const arg = try self.identifierConstant(name);
+        var getOp: OpCode = undefined;
+        var setOp: OpCode = undefined;
+        var arg: u8 = undefined;
+
+        var resolveLocalArg = try self.resolveLocal(name);
+        if (resolveLocalArg != -1) {
+            arg = @intCast(u8, resolveLocalArg);
+            getOp = .GetLocal;
+            setOp = .SetLocal;
+        } else {
+            arg = try self.identifierConstant(name);
+            getOp = .GetGlobal;
+            setOp = .SetGlobal;
+        }
 
         if (canAssign and try self.match(.Equal)) {
             try self.expression();
-            try self.emitBytes(@enumToInt(OpCode.SetGlobal), arg);
+            try self.emitUnaryOp(setOp, arg);
         } else {
-            try self.emitBytes(@enumToInt(OpCode.GetGlobal), arg);
+            try self.emitUnaryOp(getOp, arg);
         }
     }
 
@@ -254,8 +368,8 @@ const Parser = struct {
 
         // Emit the operator's corresponding instruction.
         switch (operatorType) {
-            .Bang => try self.emitByte(@enumToInt(OpCode.Not)),
-            .Minus => try self.emitByte(@enumToInt(OpCode.Negate)),
+            .Bang => try self.emitOp(.Not),
+            .Minus => try self.emitOp(.Negate),
             else => unreachable,
         }
     }
@@ -308,15 +422,36 @@ const Parser = struct {
 
     fn parseVariable(self: *Parser, errorMessage: []const u8) !u8 {
         try self.consume(.Identifier, errorMessage);
-        return self.identifierConstant(self.previous.lexeme);
+
+        try self.declareVariable();
+        if (self.compiler.scopeDepth > 0) return 0;
+
+        return try self.identifierConstant(self.previous.lexeme);
+    }
+
+    fn markInitialized(self: *Parser) void {
+        self.compiler.locals[self.compiler.localCount - 1].depth = self.compiler.scopeDepth;
     }
 
     fn defineVariable(self: *Parser, global: u8) !void {
-        try self.emitBytes(@enumToInt(OpCode.DefineGlobal), global);
+        if (self.compiler.scopeDepth > 0) {
+            self.markInitialized();
+            return;
+        }
+
+        try self.emitUnaryOp(.DefineGlobal, global);
     }
 
     fn expression(self: *Parser) !void {
         try self.parsePrecedence(.Assignment);
+    }
+
+    fn block(self: *Parser) !void {
+        while (!self.check(.RightBrace) and !self.check(.EOF)) {
+            try self.declaration();
+        }
+
+        try self.consume(.RightBrace, "Expect '}' after block.");
     }
 
     fn varDeclaration(self: *Parser) !void {
@@ -325,7 +460,7 @@ const Parser = struct {
         if (try self.match(.Equal)) {
             try self.expression();
         } else {
-            try self.emitByte(@enumToInt(OpCode.Nil));
+            try self.emitOp(.Nil);
         }
         try self.consume(.Semicolon, "Expect ';' after variable declaration.");
 
@@ -335,13 +470,13 @@ const Parser = struct {
     fn expressionStatement(self: *Parser) !void {
         try self.expression();
         try self.consume(.Semicolon, "Expect ';' after expression.");
-        try self.emitByte(@enumToInt(OpCode.Pop));
+        try self.emitOp(.Pop);
     }
 
     fn printStatement(self: *Parser) !void {
         try self.expression();
         try self.consume(.Semicolon, "Expect ';' after value.");
-        try self.emitByte(@enumToInt(OpCode.Print));
+        try self.emitOp(.Print);
     }
 
     fn synchronize(self: *Parser) !void {
@@ -357,7 +492,7 @@ const Parser = struct {
         }
     }
 
-    fn declaration(self: *Parser) !void {
+    fn declaration(self: *Parser) CompilerError!void {
         if (try self.match(.Var)) {
             try self.varDeclaration();
         } else {
@@ -370,6 +505,10 @@ const Parser = struct {
     fn statement(self: *Parser) !void {
         if (try self.match(.Print)) {
             try self.printStatement();
+        } else if (try self.match(.LeftBrace)) {
+            self.beginScope();
+            try self.block();
+            try self.endScope();
         } else {
             try self.expressionStatement();
         }

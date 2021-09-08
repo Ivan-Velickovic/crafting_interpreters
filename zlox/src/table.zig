@@ -84,9 +84,7 @@ pub const Table = struct {
         while (true) {
             const entry = self.entries[index];
             if (entry.key) |key| {
-                if (key.chars.len == chars.len
-                        and key.hash == hash
-                        and std.mem.eql(u8, key.chars, chars)) {
+                if (key.hash == hash and std.mem.eql(u8, key.chars, chars)) {
                     return key;
                 }
             } else {
