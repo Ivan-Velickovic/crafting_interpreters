@@ -78,6 +78,7 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize) !usize {
         .Jump =>            jumpInstruction("OP_JUMP", 1, chunk, offset),
         .JumpIfFalse =>     jumpInstruction("OP_JUMP_IF_FALSE", 1, chunk, offset),
         .Loop =>            jumpInstruction("OP_LOOP", -1, chunk, offset),
+        .Call =>            byteInstruction("OP_CALL", chunk, offset),
         .Return =>          simpleInstruction("OP_RETURN", offset),
     };
 }

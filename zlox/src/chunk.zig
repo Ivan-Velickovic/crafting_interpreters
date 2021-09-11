@@ -25,6 +25,7 @@ pub const OpCode = enum(u8) {
     Print,
     Jump,
     JumpIfFalse,
+    Call,
     Loop,
     Return,
 };

@@ -1,5 +1,7 @@
 const std = @import("std");
 const Obj = @import("object.zig").Obj;
+const String = @import("object.zig").Obj.String;
+const Function = @import("object.zig").Obj.Function;
 
 const ValueType = enum {
     Bool,
@@ -56,8 +58,14 @@ pub const Value = union(ValueType) {
             .Nil => try writer.print("nil", .{}),
             .Number => try writer.print("{d}", .{self.Number}),
             .Obj => {
-                switch (self.Obj.objType) {
-                    .String => try writer.print("{s}", .{self.Obj.asType(Obj.String).chars}),
+                const obj = self.Obj;
+                switch (obj.objType) {
+                    .String => try writer.print("{s}", .{obj.asType(String).chars}),
+                    .Function => {
+                        const name = if (obj.asType(Function).name) |name| name.chars else "<script>";
+                        try writer.print("<fn {s}>", .{name});
+                    },
+                    .Native => try writer.print("<native fn>", .{}),
                 }
             }
         }

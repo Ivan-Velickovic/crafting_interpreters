@@ -147,7 +147,13 @@ pub const Scanner = struct {
     fn checkKeyword(self: *Scanner, startIndex: u8, rest: []const u8, tokenType: TokenType) TokenType {
         const sourceSlice = self.start[startIndex .. startIndex + rest.len];
 
-        return if (std.mem.eql(u8, sourceSlice, rest)) tokenType else .Identifier;
+        // We also check that the size of the lexeme we're scanning is how many characters
+        // we expect the token to be.
+        if (self.current == startIndex + rest.len and std.mem.eql(u8, sourceSlice, rest)) {
+            return tokenType;
+        }
+
+        return .Identifier;
     }
 
     fn identifierType(self: *Scanner) TokenType {
@@ -160,7 +166,8 @@ pub const Scanner = struct {
                     return switch (self.start[1]) {
                         'a' => self.checkKeyword(2, "lse", .False),
                         'o' => self.checkKeyword(2, "r", .For),
-                        'n' => .Fn,
+                         // This may seem redundant but we still need to check that the whole lexeme is "fn", not just the start.
+                        'n' => self.checkKeyword(2, "", .Fn),
                         else => .Identifier,
                     };
                 } else {

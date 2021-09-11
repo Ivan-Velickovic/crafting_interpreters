@@ -3,6 +3,7 @@ const buildOptions = @import("build_options");
 const compiler = @import("compiler.zig");
 const debug = @import("debug.zig");
 const main = @import("main.zig");
+const Compiler = @import("compiler.zig").Compiler;
 const Table = @import("table.zig").Table;
 const Value = @import("value.zig").Value;
 const Chunk = @import("chunk.zig").Chunk;
@@ -19,12 +20,23 @@ pub const InterpretError = error{
     RuntimeError,
 };
 
+pub const CallFrame = struct {
+    function: *Obj.Function,
+    ip: usize,
+    start: usize, // Index into the VM stack where values for this CallFrame start.
+};
+
+fn clockNative(argCount: u8, args: []Value) Value {
+    return Value.fromNumber(@intToFloat(f64, std.time.timestamp()));
+}
+
 pub const VM = struct {
-    const STACK_MAX = 256;
+    const FRAMES_MAX = 64;
+    const STACK_MAX = FRAMES_MAX * (Compiler.MAX_LOCALS + 1);
 
     allocator: *Allocator,
-    chunk: Chunk,
-    instructionIndex: usize,
+    frames: [FRAMES_MAX]CallFrame,
+    frameCount: u8,
     stack: FixedCapacityStack(Value),
     globals: Table,
     strings: Table,
@@ -33,19 +45,20 @@ pub const VM = struct {
     pub fn create(allocator: *Allocator) !VM {
         var vm = VM{
             .allocator = allocator,
-            .chunk = Chunk.create(allocator),
-            .instructionIndex = 0,
+            .frames = undefined,
+            .frameCount = 0,
+            .stack = try FixedCapacityStack(Value).create(allocator, STACK_MAX),
             .globals = Table.create(allocator),
             .strings = Table.create(allocator),
-            .stack = try FixedCapacityStack(Value).create(allocator, STACK_MAX),
             .objects = null,
         };
+
+        try vm.defineNative("clock", clockNative);
 
         return vm;
     }
 
     pub fn destroy(self: *VM) void {
-        self.chunk.destroy();
         self.stack.destroy();
         self.globals.destroy();
         self.strings.destroy();
@@ -62,7 +75,10 @@ pub const VM = struct {
     }
 
     pub fn interpret(self: *VM, source: []const u8) !void {
-        try compiler.compile(self, source);
+        const function = try compiler.compile(source, self);
+
+        self.stack.push(Value.fromObj(&function.obj));
+        try self.call(function, 0);
 
         try self.run();
     }
@@ -70,45 +86,112 @@ pub const VM = struct {
     fn runtimeError(self: *VM, comptime fmt: []const u8, args: anytype) !void {
         try stderr.print(fmt ++ "\n", args);
 
-        std.debug.assert(self.instructionIndex != 0);
+        var i: u8 = 0;
+        while (i < self.frameCount) : (i += 1) {
+            const frame = &self.frames[self.frameCount - 1 - i];
 
-        const line = self.chunk.lines.items[self.instructionIndex - 1];
-        try stderr.print("[line {}] in script\n", .{line});
+            // frame.ip - 1 because we want to refer to the previous instruction as
+            // that is where the error occurred.
+            const line = frame.function.chunk.lines.items[frame.ip - 1];
+            try stderr.print("[line {}] in ", .{line});
+
+            if (frame.function.name) |name| {
+                try stderr.print("{s}()\n", .{name.chars});
+            } else {
+                try stderr.print("script\n", .{});
+            }
+        }
 
         self.resetStack();
     }
 
+    fn defineNative(self: *VM, name: []const u8, function: Obj.Native.Fn) !void {
+        const nameObj = &(try Obj.String.copy(self, name)).obj;
+        self.stack.push(Value.fromObj(nameObj));
+        const functionObj = &(try Obj.Native.create(self, function)).obj;
+        self.stack.push(Value.fromObj(functionObj));
+
+        _ = try self.globals.set(self.stack.items[0].Obj.asType(Obj.String), self.stack.items[1]);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+    }
+
     fn resetStack(self: *VM) void {
         self.stack.resize(0);
+        self.frameCount = 0;
     }
 
     fn peek(self: *VM, distance: usize) Value {
         return self.stack.items[self.stack.items.len - distance - 1];
     }
 
-    fn readString(self: *VM) *Obj.String {
-        return self.readConstant().Obj.asType(Obj.String);
+    fn call(self: *VM, function: *Obj.Function, argCount: u8) !void {
+        if (argCount != function.arity) {
+            try self.runtimeError("Expected {d} arguments but got {d}.", .{function.arity, argCount});
+            return InterpretError.RuntimeError;
+        }
+
+        if (self.frameCount == FRAMES_MAX) {
+            try self.runtimeError("Stack overflow.", .{});
+            return InterpretError.RuntimeError;
+        }
+
+        self.frames[self.frameCount] = CallFrame{
+            .function = function,
+            .ip = 0,
+            // We want the slots to start from the beggining of the bytecode
+            // for a function call, so we start one before its arguments since
+            // that also includes the name of the function.
+            .start = self.stack.items.len - argCount - 1,
+        };
+        self.frameCount += 1;
     }
 
-    fn readConstant(self: *VM) Value {
-        return self.chunk.constants.items[self.readByte()];
+    fn callValue(self: *VM, callee: Value, argCount: u8) !void {
+        if (callee == .Obj) {
+            switch (callee.Obj.objType) {
+                .Function => return try self.call(callee.Obj.asType(Obj.Function), argCount),
+                .Native => {
+                    const native = callee.Obj.asType(Obj.Native).function;
+                    const result = native(argCount, self.stack.items[self.stack.items.len - argCount..]);
+
+                    self.stack.resize(self.stack.items.len - argCount + 1);
+                    self.stack.push(result);
+
+                    return;
+                },
+                else => {},
+            }
+        }
+
+        try self.runtimeError("Can only call functions and classes.", .{});
+
+        return InterpretError.RuntimeError;
     }
 
-    fn readByte(self: *VM) u8 {
-        defer self.instructionIndex += 1;
-
-        return self.chunk.code.items[self.instructionIndex];
+    fn readString(frame: *CallFrame) *Obj.String {
+        return readConstant(frame).Obj.asType(Obj.String);
     }
 
-    fn readShort(self: *VM) u16 {
-        self.instructionIndex += 2;
-        var short = @as(u16, self.chunk.code.items[self.instructionIndex - 2]) << 8;
-        short |= self.chunk.code.items[self.instructionIndex - 1];
+    fn readConstant(frame: *CallFrame) Value {
+        return frame.function.chunk.constants.items[readByte(frame)];
+    }
+
+    fn readByte(frame: *CallFrame) u8 {
+        defer frame.ip += 1;
+
+        return frame.function.chunk.code.items[frame.ip];
+    }
+
+    fn readShort(frame: *CallFrame) u16 {
+        frame.ip += 2;
+        var short = @as(u16, frame.function.chunk.code.items[frame.ip - 2]) << 8;
+        short |= frame.function.chunk.code.items[frame.ip - 1];
 
         return short;
     }
 
-    fn binaryBooleanOp(self: *VM, op: OpCode) !void {
+    fn binaryBooleanOp(self: *VM, frame: *CallFrame, op: OpCode) !void {
         const rhs = self.stack.pop();
         const lhs = self.stack.pop();
 
@@ -126,7 +209,7 @@ pub const VM = struct {
         self.stack.push(Value.fromBool(result));
     }
 
-    fn binaryNumericOp(self: *VM, op: OpCode) !void {
+    fn binaryNumericOp(self: *VM, frame: *CallFrame, op: OpCode) !void {
         const rhs = self.stack.pop();
         const lhs = self.stack.pop();
 
@@ -149,11 +232,13 @@ pub const VM = struct {
         const slices = [_][]const u8 {a.chars, b.chars};
         const concatenatedChars = try std.mem.concat(self.allocator, u8, &slices);
 
-        const result = try String.take(concatenatedChars, self);
+        const result = try String.take(self, concatenatedChars);
         self.stack.push(Value.fromObj(&result.obj));
     }
 
     pub fn run(self: *VM) !void {
+        var frame = &self.frames[self.frameCount - 1];
+
         while (true) {
             if (buildOptions.debugTraceExecution) {
                 try stdout.print("          ", .{});
@@ -162,26 +247,26 @@ pub const VM = struct {
                 }
 
                 try stdout.print("\n", .{});
-                _ = try debug.disassembleInstruction(&self.chunk, self.instructionIndex);
+                _ = try debug.disassembleInstruction(&frame.function.chunk, frame.ip);
             }
 
-            const opCode = @intToEnum(OpCode, self.readByte());
+            const opCode = @intToEnum(OpCode, readByte(frame));
             switch (opCode) {
-                .Constant => self.stack.push(self.readConstant()),
+                .Constant => self.stack.push(readConstant(frame)),
                 .Nil => self.stack.push(Value.nil()),
                 .True => self.stack.push(Value.fromBool(true)),
                 .False => self.stack.push(Value.fromBool(false)),
                 .Pop => _ = self.stack.pop(),
                 .GetLocal => {
-                    const slot = self.readByte();
-                    self.stack.push(self.stack.items[slot]);
+                    const slot = readByte(frame);
+                    self.stack.push(self.stack.items[frame.start + slot]);
                 },
                 .SetLocal => {
-                    const slot = self.readByte();
-                    self.stack.items[slot] = self.peek(0);
+                    const slot = readByte(frame);
+                    self.stack.items[frame.start + slot] = self.peek(0);
                 },
                 .GetGlobal => {
-                    const name = self.readString();
+                    const name = readString(frame);
                     if (self.globals.get(name)) |value| {
                         self.stack.push(value.*);
                     } else {
@@ -190,12 +275,12 @@ pub const VM = struct {
                     }
                 },
                 .DefineGlobal => {
-                    const name = self.readString();
+                    const name = readString(frame);
                     _ = try self.globals.set(name, self.peek(0));
                     _ = self.stack.pop();
                 },
                 .SetGlobal => {
-                    const name = self.readString();
+                    const name = readString(frame);
                     if (try self.globals.set(name, self.peek(0))) {
                         _ = self.globals.delete(name);
                         try self.runtimeError("Undefined variable '{s}'.", .{name.chars});
@@ -207,8 +292,8 @@ pub const VM = struct {
                     const lhs = self.stack.pop();
                     self.stack.push(Value.fromBool(Value.isEqual(lhs, rhs)));
                 },
-                .Greater, .Less => try self.binaryBooleanOp(opCode),
-                .Subtract, .Multiply, .Divide => try self.binaryNumericOp(opCode),
+                .Greater, .Less => try self.binaryBooleanOp(frame, opCode),
+                .Subtract, .Multiply, .Divide => try self.binaryNumericOp(frame, opCode),
                 .Add => {
                     const rhs = self.stack.pop();
                     const lhs = self.stack.pop();
@@ -237,19 +322,41 @@ pub const VM = struct {
                 },
                 .Print => try stdout.print("{}\n", .{self.stack.pop()}),
                 .Jump => {
-                    const offset = self.readShort();
-                    self.instructionIndex += offset;
+                    const offset = readShort(frame);
+                    frame.ip += offset;
                 },
                 .JumpIfFalse => {
-                    const offset = self.readShort();
-                    if (self.peek(0).isFalsey()) self.instructionIndex += offset;
+                    const offset = readShort(frame);
+                    if (self.peek(0).isFalsey()) frame.ip += offset;
                 },
                 .Loop => {
-                    const offset = self.readShort();
-                    self.instructionIndex -= offset;
+                    const offset = readShort(frame);
+                    frame.ip -= offset;
                 },
-                // For Return, we simply want to exit the interpreter.
-                .Return => return,
+                .Call => {
+                    const argCount = readByte(frame);
+                    try self.callValue(self.peek(argCount), argCount);
+                    // Since calling a function will create a new CallFrame on the frames stack,
+                    // so we update the frame that is being interpreted.
+                    frame = &self.frames[self.frameCount - 1];
+                },
+                .Return => {
+                    const result = self.stack.pop();
+                    self.frameCount -= 1;
+                    if (self.frameCount == 0) {
+                        // pop the top-level "main" function if this was the last CallFrame.
+                        _ = self.stack.pop();
+                        return;
+                    }
+
+                    // Since we want to get rid of everything to do with this CallFrame that
+                    // is being discarded, we resize the stack such that it now ends at the
+                    // element before this CallFrame started.
+                    self.stack.resize(frame.start);
+
+                    self.stack.push(result);
+                    frame = &self.frames[self.frameCount - 1];
+                },
             }
         }
     }
