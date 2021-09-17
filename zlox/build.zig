@@ -17,9 +17,13 @@ pub fn build(b: *std.build.Builder) void {
     var debugDetectMemLeaks = b.option(bool, "debug-detect-mem-leaks", "Detect memory leaks") orelse false;
 
     const exe = b.addExecutable("zlox", "src/main.zig");
+    exe.setTarget(target);
+    exe.setBuildMode(mode);
 
-    exe.addBuildOption(bool, "debugAll", debugAll);
+    const options = b.addOptions();
+    exe.addOptions("build_options", options);
 
+    options.addOption(bool, "debugAll", debugAll);
     // If the general debugAll option has been set then we set all debug
     // sub-options to true.
     if (debugAll) {
@@ -27,13 +31,10 @@ pub fn build(b: *std.build.Builder) void {
         debugTraceExecution = true;
         debugDetectMemLeaks = true;
     }
+    options.addOption(bool, "debugPrintCode", debugPrintCode);
+    options.addOption(bool, "debugTraceExecution", debugTraceExecution);
+    options.addOption(bool, "debugDetectMemLeaks", debugDetectMemLeaks);
 
-    exe.addBuildOption(bool, "debugPrintCode", debugPrintCode);
-    exe.addBuildOption(bool, "debugTraceExecution", debugTraceExecution);
-    exe.addBuildOption(bool, "debugDetectMemLeaks", debugDetectMemLeaks);
-
-    exe.setTarget(target);
-    exe.setBuildMode(mode);
     exe.install();
 
     const run_cmd = exe.run();

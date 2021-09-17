@@ -1,4 +1,5 @@
 const std = @import("std");
+const Compiler = @import("Compiler.zig").Compiler;
 const VM = @import("vm.zig").VM;
 const Value = @import("value.zig").Value;
 const Chunk = @import("chunk.zig").Chunk;
@@ -8,10 +9,10 @@ pub const Obj = struct {
     next: ?*Obj,
 
     const Type = enum {
-        String, Function, Native,
+        String, Function, Native, Closure, Upvalue,
     };
 
-    fn create(vm: *VM, comptime T: type, objType: Type) !*Obj {
+    fn create(vm: *VM, comptime T: type, comptime objType: Type) !*Obj {
         const ptr = try vm.allocator.create(T);
 
         ptr.obj = Obj{
@@ -29,6 +30,8 @@ pub const Obj = struct {
             .String => self.asType(String).destroy(vm),
             .Function => self.asType(Function).destroy(vm),
             .Native => self.asType(Native).destroy(vm),
+            .Closure => self.asType(Closure).destroy(vm),
+            .Upvalue => self.asType(Upvalue).destroy(vm),
         }
     }
 
@@ -39,6 +42,56 @@ pub const Obj = struct {
     pub fn isType(value: Value, objType: Type) bool {
         return value == .Obj and value.Obj.objType == objType;
     }
+
+    pub const Upvalue = struct {
+        obj: Obj,
+        location: *Value,
+        closed: Value,
+        next: ?*Upvalue,
+
+        pub fn create(vm: *VM, slot: *Value) !*Upvalue {
+            const obj = try Obj.create(vm, Upvalue, .Upvalue);
+            const upvalue = obj.asType(Upvalue);
+            upvalue.* = Upvalue{
+                .obj = obj.*,
+                .location = slot,
+                .closed = Value.nil(),
+                .next = null,
+            };
+
+            return upvalue;
+        }
+
+        fn destroy(self: *Upvalue, vm: *VM) void {
+            // Upvalues do not own the variable that it references, hence we only free the object.
+            vm.allocator.destroy(self);
+        }
+    };
+
+    pub const Closure = struct {
+        obj: Obj,
+        function: *Function,
+        upvalues: std.ArrayList(*Upvalue),
+
+        pub fn create(vm: *VM, function: *Function) !*Closure {
+            const obj = try Obj.create(vm, Closure, .Closure);
+            const closure = obj.asType(Closure);
+            closure.* = Closure{
+                .obj = obj.*,
+                .function = function,
+                .upvalues = std.ArrayList(*Upvalue).init(vm.allocator),
+            };
+
+            return closure;
+        }
+
+        fn destroy(self: *Closure, vm: *VM) void {
+            // GC handles destroying function since there can be multiple references to the
+            // function that the closure wraps over.
+            self.upvalues.deinit();
+            vm.allocator.destroy(self);
+        }
+    };
 
     pub const Native = struct {
         pub const Fn = fn (argCount: u8, args: []Value) Value;
@@ -67,6 +120,7 @@ pub const Obj = struct {
 
         obj: Obj,
         arity: u16, // While the max arity is the max int of u8, we still want to compile even if the source reaches this limit.
+        upvalueCount: u9,
         chunk: Chunk,
         name: ?*String,
 
@@ -76,6 +130,7 @@ pub const Obj = struct {
             function.* = Function{
                 .obj = obj.*,
                 .arity = 0,
+                .upvalueCount = 0,
                 .chunk = Chunk.create(vm.allocator),
                 .name = null,
             };
@@ -102,7 +157,7 @@ pub const Obj = struct {
                 return interned;
             }
 
-            return create(vm, chars, stringHash);
+            return String.create(vm, chars, stringHash);
         }
 
         pub fn copy(vm: *VM, chars: []const u8) !*String {
@@ -114,7 +169,7 @@ pub const Obj = struct {
             const heapChars = try vm.allocator.alloc(u8, chars.len);
             std.mem.copy(u8, heapChars, chars);
 
-            return create(vm, heapChars, stringHash);
+            return String.create(vm, heapChars, stringHash);
         }
 
         fn create(vm: *VM, chars: []const u8, stringHash: u32) !*String {

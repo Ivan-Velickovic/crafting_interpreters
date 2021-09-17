@@ -13,6 +13,8 @@ pub const OpCode = enum(u8) {
     DefineGlobal,
     SetLocal,
     SetGlobal,
+    GetUpvalue,
+    SetUpvalue,
     Equal,
     Greater,
     Less,
@@ -26,7 +28,9 @@ pub const OpCode = enum(u8) {
     Jump,
     JumpIfFalse,
     Call,
+    Closure,
     Loop,
+    CloseUpvalue,
     Return,
 };
 

@@ -1,7 +1,8 @@
 const std = @import("std");
 const Obj = @import("object.zig").Obj;
-const String = @import("object.zig").Obj.String;
-const Function = @import("object.zig").Obj.Function;
+const String = Obj.String;
+const Function = Obj.Function;
+const Closure = Obj.Closure;
 
 const ValueType = enum {
     Bool,
@@ -49,8 +50,8 @@ pub const Value = union(ValueType) {
 
     pub fn format(
         self: Value,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
         writer: anytype
     ) !void {
         switch (self) {
@@ -66,6 +67,11 @@ pub const Value = union(ValueType) {
                         try writer.print("<fn {s}>", .{name});
                     },
                     .Native => try writer.print("<native fn>", .{}),
+                    .Closure => {
+                        const name = if (obj.asType(Closure).function.name) |name| name.chars else "<script>";
+                        try writer.print("<fn {s}>", .{name});
+                    },
+                    .Upvalue => try writer.print("upvalue", .{}),
                 }
             }
         }

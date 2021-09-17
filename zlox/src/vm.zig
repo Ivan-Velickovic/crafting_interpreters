@@ -21,14 +21,10 @@ pub const InterpretError = error{
 };
 
 pub const CallFrame = struct {
-    function: *Obj.Function,
+    closure: *Obj.Closure,
     ip: usize,
     start: usize, // Index into the VM stack where values for this CallFrame start.
 };
-
-fn clockNative(argCount: u8, args: []Value) Value {
-    return Value.fromNumber(@intToFloat(f64, std.time.timestamp()));
-}
 
 pub const VM = struct {
     const FRAMES_MAX = 64;
@@ -36,10 +32,11 @@ pub const VM = struct {
 
     allocator: *Allocator,
     frames: [FRAMES_MAX]CallFrame,
-    frameCount: u8,
+    frameCount: u7,
     stack: FixedCapacityStack(Value),
     globals: Table,
     strings: Table,
+    openUpvalues: ?*Obj.Upvalue,
     objects: ?*Obj,
 
     pub fn create(allocator: *Allocator) !VM {
@@ -50,6 +47,7 @@ pub const VM = struct {
             .stack = try FixedCapacityStack(Value).create(allocator, STACK_MAX),
             .globals = Table.create(allocator),
             .strings = Table.create(allocator),
+            .openUpvalues = null,
             .objects = null,
         };
 
@@ -78,7 +76,11 @@ pub const VM = struct {
         const function = try compiler.compile(source, self);
 
         self.stack.push(Value.fromObj(&function.obj));
-        try self.call(function, 0);
+        const closure = try Obj.Closure.create(self, function);
+        // Pop the function that compile returns and push the closure that wraps it.
+        _ = self.stack.pop();
+        self.stack.push(Value.fromObj(&closure.obj));
+        try self.call(closure, 0);
 
         try self.run();
     }
@@ -92,10 +94,10 @@ pub const VM = struct {
 
             // frame.ip - 1 because we want to refer to the previous instruction as
             // that is where the error occurred.
-            const line = frame.function.chunk.lines.items[frame.ip - 1];
+            const line = frame.closure.function.chunk.lines.items[frame.ip - 1];
             try stderr.print("[line {}] in ", .{line});
 
-            if (frame.function.name) |name| {
+            if (frame.closure.function.name) |name| {
                 try stderr.print("{s}()\n", .{name.chars});
             } else {
                 try stderr.print("script\n", .{});
@@ -119,15 +121,16 @@ pub const VM = struct {
     fn resetStack(self: *VM) void {
         self.stack.resize(0);
         self.frameCount = 0;
+        self.openUpvalues = null;
     }
 
     fn peek(self: *VM, distance: usize) Value {
         return self.stack.items[self.stack.items.len - distance - 1];
     }
 
-    fn call(self: *VM, function: *Obj.Function, argCount: u8) !void {
-        if (argCount != function.arity) {
-            try self.runtimeError("Expected {d} arguments but got {d}.", .{function.arity, argCount});
+    fn call(self: *VM, closure: *Obj.Closure, argCount: u8) !void {
+        if (argCount != closure.function.arity) {
+            try self.runtimeError("Expected {d} arguments but got {d}.", .{closure.function.arity, argCount});
             return InterpretError.RuntimeError;
         }
 
@@ -137,7 +140,7 @@ pub const VM = struct {
         }
 
         self.frames[self.frameCount] = CallFrame{
-            .function = function,
+            .closure = closure,
             .ip = 0,
             // We want the slots to start from the beggining of the bytecode
             // for a function call, so we start one before its arguments since
@@ -150,7 +153,7 @@ pub const VM = struct {
     fn callValue(self: *VM, callee: Value, argCount: u8) !void {
         if (callee == .Obj) {
             switch (callee.Obj.objType) {
-                .Function => return try self.call(callee.Obj.asType(Obj.Function), argCount),
+                .Closure => return try self.call(callee.Obj.asType(Obj.Closure), argCount),
                 .Native => {
                     const native = callee.Obj.asType(Obj.Native).function;
                     const result = native(argCount, self.stack.items[self.stack.items.len - argCount..]);
@@ -169,29 +172,70 @@ pub const VM = struct {
         return InterpretError.RuntimeError;
     }
 
+    fn captureUpvalue(self: *VM, local: *Value) !*Obj.Upvalue {
+        var prevUpvalue: ?*Obj.Upvalue = null;
+        var currUpvalue = self.openUpvalues;
+        while (currUpvalue) |upvalue| {
+            // Since open upvalues are ordered, we iterate past upvalues, starting from the
+            // top of the stack, that point to Values above the one we are looking for.
+            if (@ptrToInt(upvalue.location) <= @ptrToInt(local)) break;
+
+            prevUpvalue = upvalue;
+            currUpvalue = upvalue.next;
+        }
+
+        if (currUpvalue != null and currUpvalue.?.location == local) return currUpvalue.?;
+
+        var upvalue = try Obj.Upvalue.create(self, local);
+        // If we got to here, it means that local is further up the stack than where upvalue
+        // points to, so we want to insert the newly created upvalue before currUpvalue.
+        upvalue.next = currUpvalue;
+
+        if (prevUpvalue) |prev| {
+            prev.next = upvalue;
+        } else {
+            self.openUpvalues = upvalue;
+        }
+
+        return upvalue;
+    }
+
+    fn closeUpvalues(self: *VM, last: *Value) void {
+        while (self.openUpvalues) |upvalue| {
+            // We want to close every open upvalue that is above the given slot in the stack.
+            if (@ptrToInt(upvalue.location) < @ptrToInt(last)) break;
+            // We move the Value at location from the stack to the heap allocated Upvalue,
+            // we then change location to point to this "closed" value so that references
+            // to the location of an upvalue are still correct.
+            upvalue.closed = upvalue.location.*;
+            upvalue.location = &upvalue.closed;
+            self.openUpvalues = upvalue.next;
+        }
+    }
+
     fn readString(frame: *CallFrame) *Obj.String {
         return readConstant(frame).Obj.asType(Obj.String);
     }
 
     fn readConstant(frame: *CallFrame) Value {
-        return frame.function.chunk.constants.items[readByte(frame)];
+        return frame.closure.function.chunk.constants.items[readByte(frame)];
     }
 
     fn readByte(frame: *CallFrame) u8 {
         defer frame.ip += 1;
 
-        return frame.function.chunk.code.items[frame.ip];
+        return frame.closure.function.chunk.code.items[frame.ip];
     }
 
     fn readShort(frame: *CallFrame) u16 {
         frame.ip += 2;
-        var short = @as(u16, frame.function.chunk.code.items[frame.ip - 2]) << 8;
-        short |= frame.function.chunk.code.items[frame.ip - 1];
+        const hi = @as(u16, frame.closure.function.chunk.code.items[frame.ip - 2]);
+        const lo = frame.closure.function.chunk.code.items[frame.ip - 1];
 
-        return short;
+        return (hi << 8) | lo;
     }
 
-    fn binaryBooleanOp(self: *VM, frame: *CallFrame, op: OpCode) !void {
+    fn binaryBooleanOp(self: *VM, op: OpCode) !void {
         const rhs = self.stack.pop();
         const lhs = self.stack.pop();
 
@@ -209,7 +253,7 @@ pub const VM = struct {
         self.stack.push(Value.fromBool(result));
     }
 
-    fn binaryNumericOp(self: *VM, frame: *CallFrame, op: OpCode) !void {
+    fn binaryNumericOp(self: *VM, op: OpCode) !void {
         const rhs = self.stack.pop();
         const lhs = self.stack.pop();
 
@@ -247,7 +291,7 @@ pub const VM = struct {
                 }
 
                 try stdout.print("\n", .{});
-                _ = try debug.disassembleInstruction(&frame.function.chunk, frame.ip);
+                _ = try debug.disassembleInstruction(&frame.closure.function.chunk, frame.ip);
             }
 
             const opCode = @intToEnum(OpCode, readByte(frame));
@@ -287,13 +331,21 @@ pub const VM = struct {
                         return InterpretError.RuntimeError;
                     }
                 },
+                .GetUpvalue => {
+                    const slot = readByte(frame);
+                    self.stack.push(frame.closure.upvalues.items[slot].location.*);
+                },
+                .SetUpvalue => {
+                    const slot = readByte(frame);
+                    frame.closure.upvalues.items[slot].location.* = self.peek(0);
+                },
                 .Equal => {
                     const rhs = self.stack.pop();
                     const lhs = self.stack.pop();
                     self.stack.push(Value.fromBool(Value.isEqual(lhs, rhs)));
                 },
-                .Greater, .Less => try self.binaryBooleanOp(frame, opCode),
-                .Subtract, .Multiply, .Divide => try self.binaryNumericOp(frame, opCode),
+                .Greater, .Less => try self.binaryBooleanOp(opCode),
+                .Subtract, .Multiply, .Divide => try self.binaryNumericOp(opCode),
                 .Add => {
                     const rhs = self.stack.pop();
                     const lhs = self.stack.pop();
@@ -340,8 +392,30 @@ pub const VM = struct {
                     // so we update the frame that is being interpreted.
                     frame = &self.frames[self.frameCount - 1];
                 },
+                .Closure => {
+                    const function = readConstant(frame).Obj.asType(Obj.Function);
+                    const closure = try Obj.Closure.create(self, function);
+                    self.stack.push(Value.fromObj(&closure.obj));
+
+                    var i: u9 = 0;
+                    while (i < function.upvalueCount) : (i += 1) {
+                        const isLocal = readByte(frame) == 1;
+                        const index = readByte(frame);
+                        if (isLocal) {
+                            const upvalue = try self.captureUpvalue(&self.stack.items[frame.start + index]);
+                            try closure.upvalues.append(upvalue);
+                        } else {
+                            try closure.upvalues.append(frame.closure.upvalues.items[index]);
+                        }
+                    }
+                },
+                .CloseUpvalue => {
+                    self.closeUpvalues(&self.stack.items[self.stack.items.len - 1]);
+                    _ = self.stack.pop();
+                },
                 .Return => {
                     const result = self.stack.pop();
+                    self.closeUpvalues(&self.stack.items[frame.start]);
                     self.frameCount -= 1;
                     if (self.frameCount == 0) {
                         // pop the top-level "main" function if this was the last CallFrame.
@@ -361,3 +435,10 @@ pub const VM = struct {
         }
     }
 };
+
+// Built-in functions for Lox programs.
+
+// `clock()` - Timestamp in seconds, relative to UTC 1970-01-01 (as specified in Zig's stdlib).
+fn clockNative(_: u8, _: []Value) Value {
+    return Value.fromNumber(@intToFloat(f64, std.time.timestamp()));
+}

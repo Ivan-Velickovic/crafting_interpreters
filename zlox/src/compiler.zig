@@ -45,6 +45,7 @@ const Precedence = enum {
     Primary,
 
     fn next(self: Precedence) Precedence {
+        std.debug.assert(self != .Primary);
         return @intToEnum(Precedence, @enumToInt(self) + 1);
     }
 };
@@ -64,7 +65,13 @@ fn getPrecedence(tokenType: TokenType) Precedence {
 
 const Local = struct {
     name: []const u8,
+    isCaptured: bool,
     depth: isize,
+};
+
+const Upvalue = packed struct {
+    index: u8,
+    isLocal: bool,
 };
 
 const FunctionType = enum {
@@ -73,13 +80,15 @@ const FunctionType = enum {
 
 pub const Compiler = struct {
     pub const MAX_LOCALS = std.math.maxInt(u8) + 1;
+    pub const MAX_UPVALUES = std.math.maxInt(u8) + 1;
 
     enclosing: ?*Compiler,
     function: *Obj.Function,
     functionType: FunctionType,
     locals: [MAX_LOCALS]Local,
-    localCount: u16,
-    scopeDepth: u16,
+    localCount: u9,
+    upvalues: [MAX_UPVALUES]Upvalue,
+    scopeDepth: u9,
 
     fn create(vm: *VM, enclosing: ?*Compiler, functionType: FunctionType) !Compiler {
         var compiler = Compiler{
@@ -87,12 +96,14 @@ pub const Compiler = struct {
             .function = try Obj.Function.create(vm),
             .functionType = functionType,
             .locals = undefined,
+            .upvalues = undefined,
             .localCount = 0,
             .scopeDepth = 0,
         };
 
         compiler.locals[compiler.localCount] = Local{
             .name = "",
+            .isCaptured = false,
             .depth = 0,
         };
         compiler.localCount += 1;
@@ -137,7 +148,6 @@ const Parser = struct {
         // compiler being "ended" isn't the top-level one). The reason this works is because
         // when the top-level compiler is "ended", it is not referred to any more by the parser.
         if (self.compiler.enclosing) |enclosing| {
-            std.debug.assert(enclosing.enclosing == null);
             self.compiler = enclosing;
         }
 
@@ -156,8 +166,13 @@ const Parser = struct {
         self.compiler.scopeDepth -= 1;
 
         while (self.compiler.localCount > 0
-                and self.compiler.locals[self.compiler.localCount - 1].depth > self.compiler.scopeDepth) {
-            try self.emitOp(.Pop);
+                and self.compiler.locals[self.compiler.localCount - 1].depth > self.compiler.scopeDepth)
+        {
+            if (self.compiler.locals[self.compiler.localCount - 1].isCaptured) {
+                try self.emitOp(.CloseUpvalue);
+            } else {
+                try self.emitOp(.Pop);
+            }
             self.compiler.localCount -= 1;
         }
     }
@@ -301,53 +316,92 @@ const Parser = struct {
         return try self.makeConstant(try self.stringValue(name));
     }
 
-    fn resolveLocal(self: *Parser, name: []const u8) !isize {
-        var i: isize = self.compiler.localCount - 1;
+    fn resolveLocal(self: *Parser, compiler: *Compiler, name: []const u8) !isize {
+        var i: isize = compiler.localCount - 1;
         while (i >= 0) : (i -= 1) {
-            const local = self.compiler.locals[@intCast(usize, i)];
+            const local = compiler.locals[@intCast(usize, i)];
             if (std.mem.eql(u8, name, local.name)) {
                 if (local.depth == -1) {
                     try self.errorAtPrevious("Can't read local variable in its own initializer.", .{});
                 }
 
-                return @intCast(isize, i);
+                return i;
             }
         }
 
         return -1;
     }
 
-    fn addLocal(self: *Parser, name: []const u8) !void {
-        if (self.compiler.locals.len == self.compiler.localCount) {
+    fn addLocal(self: *Parser, compiler: *Compiler, name: []const u8) !void {
+        if (compiler.localCount == Compiler.MAX_LOCALS) {
             try self.errorAtPrevious("Too many local variables in function.", .{});
             return;
         }
 
-        self.compiler.locals[self.compiler.localCount] = Local{
+        compiler.locals[compiler.localCount] = Local{
             .name = name,
+            .isCaptured = false,
             .depth = -1,
         };
-        self.compiler.localCount += 1;
+        compiler.localCount += 1;
+    }
+
+    fn resolveUpvalue(self: *Parser, compiler: *Compiler, name: []const u8) CompilerError!isize {
+        if (compiler.enclosing) |enclosing| {
+            const local = try self.resolveLocal(enclosing, name);
+            if (local != -1) {
+                enclosing.locals[@intCast(usize, local)].isCaptured = true;
+                return @intCast(isize, try self.addUpvalue(compiler, @intCast(u8, local), true));
+            }
+
+            const upvalue = try self.resolveUpvalue(enclosing, name);
+            if (upvalue != -1) {
+                return @intCast(isize, try self.addUpvalue(compiler, @intCast(u8, upvalue), false));
+            }
+        }
+
+        return -1;
+    }
+
+    fn addUpvalue(self: *Parser, compiler: *Compiler, index: u8, isLocal: bool) !usize {
+        var i: usize = 0;
+        while (i < compiler.function.upvalueCount) : (i += 1) {
+            const upvalue = compiler.upvalues[i];
+            if (upvalue.index == index and upvalue.isLocal == isLocal) {
+                return i;
+            }
+        }
+
+        if (compiler.function.upvalueCount == Compiler.MAX_UPVALUES) {
+            try self.errorAtPrevious("Too many closure variables in function.", .{});
+            return InterpretError.CompileError;
+        }
+
+        compiler.upvalues[compiler.function.upvalueCount] = Upvalue{
+            .isLocal = isLocal,
+            .index = index,
+        };
+        compiler.function.upvalueCount += 1;
+
+        return compiler.function.upvalueCount - 1;
     }
 
     fn declareVariable(self: *Parser) !void {
         if (self.compiler.scopeDepth == 0) return;
 
-        if (self.compiler.localCount > 0) {
-            // Look for any variables in the same scope that have the same name.
-            // We start from end of the array since that is where the current scope is.
-            var i: isize = self.compiler.localCount - 1;
-            while (i >= 0) : (i -= 1) {
-                const local = &self.compiler.locals[@intCast(usize, i)];
-                if (local.depth != -1 and local.depth < self.compiler.scopeDepth) break;
+        // Look for any variables in the same scope that have the same name.
+        // We start from end of the array since that is where the current scope is.
+        var i: isize = self.compiler.localCount - 1;
+        while (i >= 0) : (i -= 1) {
+            const local = self.compiler.locals[@intCast(usize, i)];
+            if (local.depth != -1 and local.depth < self.compiler.scopeDepth) break;
 
-                if (std.mem.eql(u8, self.previous.lexeme, local.name)) {
-                    try self.errorAtPrevious("Already a variable with this name in this scope.", .{});
-                }
+            if (std.mem.eql(u8, self.previous.lexeme, local.name)) {
+                try self.errorAtPrevious("Already a variable with this name in this scope.", .{});
             }
         }
 
-        try self.addLocal(self.previous.lexeme);
+        try self.addLocal(self.compiler, self.previous.lexeme);
     }
 
     fn binary(self: *Parser) !void {
@@ -393,7 +447,7 @@ const Parser = struct {
         if (std.fmt.parseFloat(f64, self.previous.lexeme)) |value| {
             try self.emitConstant(Value.fromNumber(value));
         } else |e| {
-            try self.errorAtPrevious("Could not parse number", .{});
+            try self.errorAtPrevious("Could not parse number: {s}", .{e});
         }
     }
 
@@ -419,15 +473,22 @@ const Parser = struct {
         var setOp: OpCode = undefined;
         var arg: u8 = undefined;
 
-        var resolveLocalArg = try self.resolveLocal(name);
+        const resolveLocalArg = try self.resolveLocal(self.compiler, name);
         if (resolveLocalArg != -1) {
             arg = @intCast(u8, resolveLocalArg);
             getOp = .GetLocal;
             setOp = .SetLocal;
         } else {
-            arg = try self.identifierConstant(name);
-            getOp = .GetGlobal;
-            setOp = .SetGlobal;
+            const resolveUpvalueArg = try self.resolveUpvalue(self.compiler, name);
+            if (resolveUpvalueArg != -1) {
+                arg = @intCast(u8, resolveUpvalueArg);
+                getOp = .GetUpvalue;
+                setOp = .SetUpvalue;
+            } else {
+                arg = try self.identifierConstant(name);
+                getOp = .GetGlobal;
+                setOp = .SetGlobal;
+            }
         }
 
         if (canAssign and try self.match(.Equal)) {
@@ -472,7 +533,7 @@ const Parser = struct {
         try self.errorAtPrevious("Expect expression.", .{});
     }
 
-    fn infix(self: *Parser, tokenType: TokenType, canAssign: bool) !void {
+    fn infix(self: *Parser, tokenType: TokenType) !void {
         switch (tokenType) {
             .LeftParen => try self.call(),
             .Or => try self.or_(),
@@ -497,7 +558,7 @@ const Parser = struct {
 
         while (@enumToInt(precedence) <= @enumToInt(getPrecedence(self.current.tokenType))) {
             try self.advance();
-            try self.infix(self.previous.tokenType, canAssign);
+            try self.infix(self.previous.tokenType);
         }
 
         if (canAssign and try self.match(.Equal)) {
@@ -537,11 +598,15 @@ const Parser = struct {
 
                 if (argCount == Obj.Function.MAX_ARITY) {
                     try self.errorAtPrevious("Can't have more than {d} arguments.", .{Obj.Function.MAX_ARITY});
-                } else if (argCount < Obj.Function.MAX_ARITY) {
-                    // Note that this is not the most ideal solution, however, we want to
-                    // continue parsing arguments even though the source has reached the limit.
-                    argCount += 1;
                 }
+
+                // Note that this is not the most ideal solution, however, we want to continue parsing
+                // arguments even though the source has reached the limit.
+                // The book doesn't explain how to deal with this error, I've decided to max out at 255.
+                // I'm having issues with simply returning with an error as Zig prints out a massive stack
+                // trace with more information than the user would actually need, hence this TODO. At a point
+                // like this I would actually want to continue compilation but stop before the VM executes.
+                argCount = @addWithSaturation(argCount, 1);
 
                 if (!try self.match(.Comma)) break;
             }
@@ -574,7 +639,8 @@ const Parser = struct {
     }
 
     fn function_(self: *Parser, functionType: FunctionType) !void {
-        self.compiler = &try Compiler.create(self.vm, self.compiler, functionType);
+        var compiler = try Compiler.create(self.vm, self.compiler, functionType);
+        self.compiler = &compiler;
         self.compiler.function.name = try Obj.String.copy(self.vm, self.previous.lexeme);
         self.beginScope();
 
@@ -596,7 +662,13 @@ const Parser = struct {
         try self.block();
 
         const function = try self.end();
-        try self.emitUnaryOp(.Constant, try self.makeConstant(Value.fromObj(&function.obj)));
+        try self.emitUnaryOp(.Closure, try self.makeConstant(Value.fromObj(&function.obj)));
+
+        var i: u9 = 0;
+        while (i < function.upvalueCount) : (i += 1) {
+            try self.emitByte(@boolToInt(compiler.upvalues[i].isLocal));
+            try self.emitByte(compiler.upvalues[i].index);
+        }
     }
 
     fn fnDeclaration(self: *Parser) !void {

@@ -42,14 +42,17 @@ fn runFile(allocator: *Allocator, path: []const u8) !void {
     defer vm.destroy();
 
     vm.interpret(source) catch |err| {
-        if (err == InterpretError.CompileError) std.c.exit(65);
-        if (err == InterpretError.RuntimeError) std.c.exit(70);
+        if (err == InterpretError.CompileError) std.process.exit(65);
+        if (err == InterpretError.RuntimeError) std.process.exit(70);
         return err;
     };
 }
 
 fn readFile(allocator: *Allocator, path: []const u8) ![]const u8 {
-    const file = try std.fs.cwd().openFile(path, .{ .read = true });
+    const file = std.fs.cwd().openFile(path, .{ .read = true }) catch |err| {
+        try stderr.print("Could not open file for reading: {s}\n", .{err});
+        std.process.exit(74);
+    };
     defer file.close();
 
     const fileStat = try file.stat();
@@ -60,7 +63,7 @@ fn readFile(allocator: *Allocator, path: []const u8) ![]const u8 {
 
     if (bytesRead != fileSize) {
         try stderr.print("Could not read all of the file.\n", .{});
-        std.c.exit(74);
+        std.process.exit(74);
     }
 
     return buffer;

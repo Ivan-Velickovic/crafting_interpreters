@@ -2,6 +2,7 @@ const std = @import("std");
 const stdout = @import("main.zig").stdout;
 const Chunk = @import("chunk.zig").Chunk;
 const OpCode = @import("chunk.zig").OpCode;
+const Obj = @import("object.zig").Obj;
 
 pub fn disassembleChunk(chunk: *Chunk, name: []const u8) !void {
     try stdout.print("== {s} ==\n", .{name});
@@ -66,6 +67,8 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize) !usize {
         .DefineGlobal =>    constantInstruction("OP_DEFINE_GLOBAL", chunk, offset),
         .SetGlobal =>       constantInstruction("OP_SET_GLOBAL", chunk, offset),
         .Equal =>           simpleInstruction("OP_EQUAL", offset),
+        .GetUpvalue =>      byteInstruction("OP_GET_UPVALUE", chunk, offset),
+        .SetUpvalue =>      byteInstruction("OP_SET_UPVALUE", chunk, offset),
         .Greater =>         simpleInstruction("OP_GREATER", offset),
         .Less =>            simpleInstruction("OP_LESS", offset),
         .Add =>             simpleInstruction("OP_ADD", offset),
@@ -79,6 +82,28 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize) !usize {
         .JumpIfFalse =>     jumpInstruction("OP_JUMP_IF_FALSE", 1, chunk, offset),
         .Loop =>            jumpInstruction("OP_LOOP", -1, chunk, offset),
         .Call =>            byteInstruction("OP_CALL", chunk, offset),
+        .Closure => {
+            var nextOffset = offset + 1;
+
+            const constant = chunk.code.items[nextOffset];
+            nextOffset += 1;
+            try stdout.print("{s: <16} {d: >4} {s}\n", .{"OP_CLOSURE", constant, chunk.constants.items[constant]});
+
+            const function = chunk.constants.items[constant].Obj.asType(Obj.Function);
+            var i: @TypeOf(function.upvalueCount) = 0;
+            while (i < function.upvalueCount) : (i += 1) {
+                const isLocal = chunk.code.items[nextOffset] == 1;
+                nextOffset += 1;
+                const index = chunk.code.items[nextOffset];
+                nextOffset += 1;
+
+                const variableKind = if (isLocal) "local" else "upvalue";
+                try stdout.print("{d:0>4}      |                     {s} {d}\n", .{ nextOffset - 2, variableKind, index });
+            }
+
+            return nextOffset;
+        },
+        .CloseUpvalue =>    simpleInstruction("OP_CLOSE_UPVALUE", offset),
         .Return =>          simpleInstruction("OP_RETURN", offset),
     };
 }
