@@ -5,13 +5,13 @@ const Allocator = std.mem.Allocator;
 
 pub fn FixedCapacityStack(comptime T: type) type {
     return struct {
-        allocator: *Allocator,
+        allocator: Allocator,
         buffer: []T,
         items: []T,
 
         const Self = @This();
 
-        pub fn create(allocator: *Allocator, comptime capacity: usize) !Self {
+        pub fn create(allocator: Allocator, comptime capacity: usize) !Self {
             var buffer = try allocator.alloc(T, capacity);
 
             return Self{

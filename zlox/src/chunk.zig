@@ -39,7 +39,7 @@ pub const Chunk = struct {
     lines: std.ArrayList(u32),
     constants: std.ArrayList(Value),
 
-    pub fn create(allocator: *Allocator) Chunk {
+    pub fn create(allocator: Allocator) Chunk {
         return Chunk{
             .code = std.ArrayList(u8).init(allocator),
             .lines = std.ArrayList(u32).init(allocator),

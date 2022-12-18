@@ -1,5 +1,5 @@
 const std = @import("std");
-const Compiler = @import("Compiler.zig").Compiler;
+const Compiler = @import("compiler.zig").Compiler;
 const VM = @import("vm.zig").VM;
 const Value = @import("value.zig").Value;
 const Chunk = @import("chunk.zig").Chunk;
@@ -94,7 +94,7 @@ pub const Obj = struct {
     };
 
     pub const Native = struct {
-        pub const Fn = fn (argCount: u8, args: []Value) Value;
+        pub const Fn = *const fn (argCount: u8, args: []Value) Value;
 
         obj: Obj,
         function: Fn,

@@ -74,9 +74,7 @@ const Upvalue = packed struct {
     isLocal: bool,
 };
 
-const FunctionType = enum {
-    Function, Script
-};
+const FunctionType = enum { Function, Script };
 
 pub const Compiler = struct {
     pub const MAX_LOCALS = std.math.maxInt(u8) + 1;
@@ -165,9 +163,7 @@ const Parser = struct {
     fn endScope(self: *Parser) !void {
         self.compiler.scopeDepth -= 1;
 
-        while (self.compiler.localCount > 0
-                and self.compiler.locals[self.compiler.localCount - 1].depth > self.compiler.scopeDepth)
-        {
+        while (self.compiler.localCount > 0 and self.compiler.locals[self.compiler.localCount - 1].depth > self.compiler.scopeDepth) {
             if (self.compiler.locals[self.compiler.localCount - 1].isCaptured) {
                 try self.emitOp(.CloseUpvalue);
             } else {
@@ -410,16 +406,16 @@ const Parser = struct {
         try self.parsePrecedence(precedence.next());
 
         switch (operatorType) {
-            .BangEqual =>       try self.emitOps(.Equal, .Not),
-            .EqualEqual =>      try self.emitOp(.Equal),
-            .Greater =>         try self.emitOp(.Greater),
-            .GreaterEqual =>    try self.emitOps(.Less, .Not),
-            .Less =>            try self.emitOp(.Less),
-            .LessEqual =>       try self.emitOps(.Greater, .Not),
-            .Plus =>            try self.emitOp(.Add),
-            .Minus =>           try self.emitOp(.Subtract),
-            .Star =>            try self.emitOp(.Multiply),
-            .Slash =>           try self.emitOp(.Divide),
+            .BangEqual => try self.emitOps(.Equal, .Not),
+            .EqualEqual => try self.emitOp(.Equal),
+            .Greater => try self.emitOp(.Greater),
+            .GreaterEqual => try self.emitOps(.Less, .Not),
+            .Less => try self.emitOp(.Less),
+            .LessEqual => try self.emitOps(.Greater, .Not),
+            .Plus => try self.emitOp(.Add),
+            .Minus => try self.emitOp(.Subtract),
+            .Star => try self.emitOp(.Multiply),
+            .Slash => try self.emitOp(.Divide),
             else => unreachable,
         }
     }
@@ -446,8 +442,8 @@ const Parser = struct {
     fn number(self: *Parser) !void {
         if (std.fmt.parseFloat(f64, self.previous.lexeme)) |value| {
             try self.emitConstant(Value.fromNumber(value));
-        } else |e| {
-            try self.errorAtPrevious("Could not parse number: {s}", .{e});
+        } else |err| {
+            try self.errorAtPrevious("Could not parse number: {}", .{ err });
         }
     }
 
@@ -538,10 +534,7 @@ const Parser = struct {
             .LeftParen => try self.call(),
             .Or => try self.or_(),
             .And => try self.and_(),
-            .Minus, .Plus,
-            .Slash, .Star,
-            .BangEqual, .EqualEqual,
-            .Greater, .GreaterEqual, .Less, .LessEqual => try self.binary(),
+            .Minus, .Plus, .Slash, .Star, .BangEqual, .EqualEqual, .Greater, .GreaterEqual, .Less, .LessEqual => try self.binary(),
             else => try self.infixError(),
         }
     }
@@ -598,15 +591,10 @@ const Parser = struct {
 
                 if (argCount == Obj.Function.MAX_ARITY) {
                     try self.errorAtPrevious("Can't have more than {d} arguments.", .{Obj.Function.MAX_ARITY});
+                } else {
+                    argCount += 1;
                 }
 
-                // Note that this is not the most ideal solution, however, we want to continue parsing
-                // arguments even though the source has reached the limit.
-                // The book doesn't explain how to deal with this error, I've decided to max out at 255.
-                // I'm having issues with simply returning with an error as Zig prints out a massive stack
-                // trace with more information than the user would actually need, hence this TODO. At a point
-                // like this I would actually want to continue compilation but stop before the VM executes.
-                argCount = @addWithSaturation(argCount, 1);
 
                 if (!try self.match(.Comma)) break;
             }

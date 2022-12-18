@@ -11,11 +11,11 @@ const Entry = struct {
 pub const Table = struct {
     const MAX_LOAD = 0.75;
 
-    allocator: *Allocator,
+    allocator: Allocator,
     entries: []Entry, // The capacity of our table is simply the length of entries.
     count: usize,
 
-    pub fn create(allocator: *Allocator) Table {
+    pub fn create(allocator: Allocator) Table {
         return Table{
             .allocator = allocator,
             .entries = &[_]Entry{},

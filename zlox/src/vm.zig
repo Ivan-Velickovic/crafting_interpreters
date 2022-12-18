@@ -30,7 +30,7 @@ pub const VM = struct {
     const FRAMES_MAX = 64;
     const STACK_MAX = FRAMES_MAX * (Compiler.MAX_LOCALS + 1);
 
-    allocator: *Allocator,
+    allocator: Allocator,
     frames: [FRAMES_MAX]CallFrame,
     frameCount: u7,
     stack: FixedCapacityStack(Value),
@@ -39,7 +39,7 @@ pub const VM = struct {
     openUpvalues: ?*Obj.Upvalue,
     objects: ?*Obj,
 
-    pub fn create(allocator: *Allocator) !VM {
+    pub fn create(allocator: Allocator) !VM {
         var vm = VM{
             .allocator = allocator,
             .frames = undefined,

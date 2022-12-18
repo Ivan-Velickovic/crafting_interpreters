@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const buildOptions = @import("build_options");
 const VM = @import("vm.zig").VM;
 const InterpretError = @import("vm.zig").InterpretError;
@@ -21,20 +22,20 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     if (buildOptions.debugDetectMemLeaks) _ = gpa.detectLeaks();
 
-    const args = try process.argsAlloc(&gpa.allocator);
-    defer process.argsFree(&gpa.allocator, args);
+    const args = try process.argsAlloc(gpa.allocator());
+    defer process.argsFree(gpa.allocator(), args);
 
     switch (args.len) {
-        1 => try repl(&gpa.allocator),
-        2 => try runFile(&gpa.allocator, args[1]),
+        1 => try repl(gpa.allocator()),
+        2 => try runFile(gpa.allocator(), args[1]),
         else => {
-            std.debug.warn("Usage: lox [path]\n", .{});
+            try stdout.print("Usage: lox [path]\n", .{});
             process.exit(64);
         },
     }
 }
 
-fn runFile(allocator: *Allocator, path: []const u8) !void {
+fn runFile(allocator: Allocator, path: []const u8) !void {
     const source = try readFile(allocator, path);
     defer allocator.free(source);
 
@@ -48,9 +49,10 @@ fn runFile(allocator: *Allocator, path: []const u8) !void {
     };
 }
 
-fn readFile(allocator: *Allocator, path: []const u8) ![]const u8 {
-    const file = std.fs.cwd().openFile(path, .{ .read = true }) catch |err| {
-        try stderr.print("Could not open file for reading: {s}\n", .{err});
+fn readFile(allocator: Allocator, path: []const u8) ![]const u8 {
+    // By default the mode that openFile will open the file in is read only.
+    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        try stderr.print("Could not open file for reading: {}\n", .{ err });
         std.process.exit(74);
     };
     defer file.close();
@@ -69,7 +71,7 @@ fn readFile(allocator: *Allocator, path: []const u8) ![]const u8 {
     return buffer;
 }
 
-fn repl(allocator: *Allocator) !void {
+fn repl(allocator: Allocator) !void {
     var vm = try VM.create(allocator);
     defer vm.destroy();
 
@@ -91,7 +93,7 @@ fn nextLine(reader: anytype, buffer: []u8) !?[]const u8 {
         '\n',
     )) orelse return null;
 
-    if (std.builtin.os.tag == .windows) {
+    if (builtin.os.tag == .windows) {
         line = std.mem.trimRight(u8, line, "\r");
     }
 
