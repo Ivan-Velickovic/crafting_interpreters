@@ -54,7 +54,7 @@ const Precedence = enum {
 
 fn getPrecedence(tokenType: TokenType) Precedence {
     return switch (tokenType) {
-        .LeftParen => .Call,
+        .LeftParen, .Dot => .Call,
         .Or => .Or,
         .And => .And,
         .Minus, .Plus => .Term,
@@ -426,6 +426,18 @@ pub const Parser = struct {
         try self.emitUnaryOp(.Call, argCount);
     }
 
+    fn dot(self: *Parser, can_assign: bool) !void {
+        try self.consume(.Identifier, "Expect property name after '.'.");
+        const name = try self.identifierConstant(self.previous.lexeme);
+
+        if (can_assign and try self.match(.Equal)) {
+            try self.expression();
+            try self.emitUnaryOp(.SetProperty, name);
+        } else {
+            try self.emitUnaryOp(.GetProperty, name);
+        }
+    }
+
     fn literal(self: *Parser) !void {
         switch (self.previous.tokenType) {
             .False => try self.emitOp(.False),
@@ -465,7 +477,7 @@ pub const Parser = struct {
         try self.emitConstant(try self.stringValue(stringToCopy));
     }
 
-    fn namedVariable(self: *Parser, name: []const u8, canAssign: bool) !void {
+    fn namedVariable(self: *Parser, name: []const u8, can_assign: bool) !void {
         var getOp: OpCode = undefined;
         var setOp: OpCode = undefined;
         var arg: u8 = undefined;
@@ -488,7 +500,7 @@ pub const Parser = struct {
             }
         }
 
-        if (canAssign and try self.match(.Equal)) {
+        if (can_assign and try self.match(.Equal)) {
             try self.expression();
             try self.emitUnaryOp(setOp, arg);
         } else {
@@ -496,8 +508,8 @@ pub const Parser = struct {
         }
     }
 
-    fn variable(self: *Parser, canAssign: bool) !void {
-        try self.namedVariable(self.previous.lexeme, canAssign);
+    fn variable(self: *Parser, can_assign: bool) !void {
+        try self.namedVariable(self.previous.lexeme, can_assign);
     }
 
     fn unary(self: *Parser) !void {
@@ -514,11 +526,11 @@ pub const Parser = struct {
         }
     }
 
-    fn prefix(self: *Parser, tokenType: TokenType, canAssign: bool) !void {
+    fn prefix(self: *Parser, tokenType: TokenType, can_assign: bool) !void {
         switch (tokenType) {
             .LeftParen => try self.grouping(),
             .Minus, .Bang => try self.unary(),
-            .Identifier => try self.variable(canAssign),
+            .Identifier => try self.variable(can_assign),
             .String => try self.string(),
             .Number => try self.number(),
             .False, .True, .Nil => try self.literal(),
@@ -530,11 +542,12 @@ pub const Parser = struct {
         try self.errorAtPrevious("Expect expression.", .{});
     }
 
-    fn infix(self: *Parser, tokenType: TokenType) !void {
+    fn infix(self: *Parser, tokenType: TokenType, can_assign: bool) !void {
         switch (tokenType) {
             .LeftParen => try self.call(),
             .Or => try self.or_(),
             .And => try self.and_(),
+            .Dot => try self.dot(can_assign),
             .Minus, .Plus, .Slash, .Star, .BangEqual, .EqualEqual, .Greater, .GreaterEqual, .Less, .LessEqual => try self.binary(),
             else => try self.infixError(),
         }
@@ -547,15 +560,15 @@ pub const Parser = struct {
     fn parsePrecedence(self: *Parser, precedence: Precedence) CompilerError!void {
         try self.advance();
 
-        const canAssign = @enumToInt(precedence) <= @enumToInt(Precedence.Assignment);
-        try self.prefix(self.previous.tokenType, canAssign);
+        const can_assign = @enumToInt(precedence) <= @enumToInt(Precedence.Assignment);
+        try self.prefix(self.previous.tokenType, can_assign);
 
         while (@enumToInt(precedence) <= @enumToInt(getPrecedence(self.current.tokenType))) {
             try self.advance();
-            try self.infix(self.previous.tokenType);
+            try self.infix(self.previous.tokenType, can_assign);
         }
 
-        if (canAssign and try self.match(.Equal)) {
+        if (can_assign and try self.match(.Equal)) {
             try self.errorAtPrevious("Invalid assignment target.", .{});
         }
     }
@@ -657,6 +670,18 @@ pub const Parser = struct {
             try self.emitByte(@boolToInt(compiler.upvalues[i].isLocal));
             try self.emitByte(compiler.upvalues[i].index);
         }
+    }
+
+    fn classDeclaration(self: *Parser) !void {
+        try self.consume(.Identifier, "Expect class name.");
+        const name_constant = try self.identifierConstant(self.previous.lexeme);
+        try self.declareVariable();
+
+        try self.emitBytes(@enumToInt(OpCode.Class), name_constant);
+        try self.defineVariable(name_constant);
+
+        try self.consume(.LeftBrace, "Expect '{' before class body.");
+        try self.consume(.RightBrace, "Expect '}' after class body.");
     }
 
     fn fnDeclaration(self: *Parser) !void {
@@ -799,7 +824,9 @@ pub const Parser = struct {
     }
 
     fn declaration(self: *Parser) CompilerError!void {
-        if (try self.match(.Fn)) {
+        if (try self.match(.Class)) {
+            try self.classDeclaration();
+        } else if (try self.match(.Fn)) {
             try self.fnDeclaration();
         } else if (try self.match(.Var)) {
             try self.varDeclaration();

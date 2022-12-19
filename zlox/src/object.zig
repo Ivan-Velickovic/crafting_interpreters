@@ -4,6 +4,7 @@ const Compiler = @import("compiler.zig").Compiler;
 const VM = @import("vm.zig").VM;
 const Value = @import("value.zig").Value;
 const Chunk = @import("chunk.zig").Chunk;
+const Table = @import("table.zig").Table;
 
 pub const Obj = struct {
     objType: Type,
@@ -11,7 +12,7 @@ pub const Obj = struct {
     next: ?*Obj,
 
     const Type = enum {
-        String, Function, Native, Closure, Upvalue,
+        Class, Closure, Function, Instance, Native, String, Upvalue
     };
 
     fn allocate(vm: *VM, comptime T: type, comptime objType: Type) !*Obj {
@@ -38,9 +39,11 @@ pub const Obj = struct {
         }
 
         switch (self.objType) {
+            .Class => self.asType(Class).destroy(vm),
             .String => self.asType(String).destroy(vm),
             .Function => self.asType(Function).destroy(vm),
             .Native => self.asType(Native).destroy(vm),
+            .Instance => self.asType(Instance).destroy(vm),
             .Closure => self.asType(Closure).destroy(vm),
             .Upvalue => self.asType(Upvalue).destroy(vm),
         }
@@ -53,6 +56,46 @@ pub const Obj = struct {
     pub fn isType(value: Value, objType: Type) bool {
         return value == .Obj and value.Obj.objType == objType;
     }
+
+    pub const Class = struct {
+        obj: Obj,
+        name: *String,
+
+        pub fn create(vm: *VM, name: *String) !*Class {
+            const obj = try Obj.allocate(vm, Class, .Class);
+            const class = obj.asType(Class);
+            class.* = Class{
+                .obj = obj.*,
+                .name = name,
+            };
+
+            return class;
+        }
+
+        fn destroy(self: *Class, vm: *VM) void {
+            vm.allocator.destroy(self);
+        }
+    };
+
+    pub const Instance = struct {
+        obj: Obj,
+        class: *Class,
+        fields: Table,
+
+        pub fn create(vm: *VM, class: *Class) !*Instance {
+            const obj = try Obj.allocate(vm, Instance, .Instance);
+            var instance = obj.asType(Instance);
+            instance.class = class;
+            instance.fields = Table.create(vm.allocator);
+
+            return instance;
+        }
+
+        fn destroy(self: *Instance, vm: *VM) void {
+            self.fields.destroy();
+            vm.allocator.destroy(self);
+        }
+    };
 
     pub const Upvalue = struct {
         obj: Obj,

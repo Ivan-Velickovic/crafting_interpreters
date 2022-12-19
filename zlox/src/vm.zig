@@ -10,7 +10,8 @@ const Value = @import("value.zig").Value;
 const Chunk = @import("chunk.zig").Chunk;
 const OpCode = @import("chunk.zig").OpCode;
 const Obj = @import("object.zig").Obj;
-const String = @import("object.zig").Obj.String;
+const String = Obj.String;
+const Instance = Obj.Instance;
 const FixedCapacityStack = @import("stack.zig").FixedCapacityStack;
 const Allocator = std.mem.Allocator;
 const stdout = main.stdout;
@@ -175,6 +176,12 @@ pub const VM = struct {
     fn callValue(self: *VM, callee: Value, argCount: u8) !void {
         if (callee == .Obj) {
             switch (callee.Obj.objType) {
+                .Class => {
+                    const class = callee.Obj.asType(Obj.Class);
+                    const instance = try Obj.Instance.create(self, class);
+                    self.stack.items[self.stack.items.len - argCount - 1] = Value.fromObj(&instance.obj);
+                    return;
+                },
                 .Closure => return try self.call(callee.Obj.asType(Obj.Closure), argCount),
                 .Native => {
                     const native = callee.Obj.asType(Obj.Native).function;
@@ -343,7 +350,7 @@ pub const VM = struct {
                     if (self.globals.get(name)) |value| {
                         self.stack.push(value.*);
                     } else {
-                        try self.runtimeError("Undefined variable '{s}'.", .{name.chars});
+                        try self.runtimeError("Undefined variable '{s}'.", .{ name.chars });
                         return InterpretError.RuntimeError;
                     }
                 },
@@ -356,7 +363,7 @@ pub const VM = struct {
                     const name = readString(frame);
                     if (try self.globals.set(name, self.peek(0))) {
                         _ = self.globals.delete(name);
-                        try self.runtimeError("Undefined variable '{s}'.", .{name.chars});
+                        try self.runtimeError("Undefined variable '{s}'.", .{ name.chars });
                         return InterpretError.RuntimeError;
                     }
                 },
@@ -367,6 +374,49 @@ pub const VM = struct {
                 .SetUpvalue => {
                     const slot = readByte(frame);
                     frame.closure.upvalues.items[slot].location.* = self.peek(0);
+                },
+                .GetProperty => {
+                    if (!Obj.isType(self.peek(0), .Instance)) {
+                        try self.runtimeError("Only instances have properties.", .{});
+                        return InterpretError.RuntimeError;
+                    }
+
+                    const instance = self.peek(0).Obj.asType(Instance);
+                    const field_name = readString(frame);
+
+                    if (instance.fields.get(field_name)) |value| {
+                        _ = self.stack.pop(); // Pop the instance.
+                        self.stack.push(value.*);
+                    } else {
+                        try self.runtimeError("Undefined property '{s}'.", .{ field_name.chars });
+                        return InterpretError.RuntimeError;
+                    }
+                },
+                .SetProperty => {
+                    if (!Obj.isType(self.peek(1), .Instance)) {
+                        try self.runtimeError("Only instances have fields.", .{});
+                        return InterpretError.RuntimeError;
+                    }
+
+                    // Here the current state of the stack has the class
+                    // instance below the value to be set to the field. Since
+                    // setting a field itself is an expression, we want to pop
+                    // off the instance (by popping the field value first) and
+                    // then push the field value back on to the stack.
+                    // An example below:
+                    //
+                    // class Bread {}
+                    // var bread = Bread();
+                    // print bread.spread = "marmite";
+                    // 
+                    // In addition to setting the field, the last line will
+                    // print "marmite";
+                    const instance = self.peek(1).Obj.asType(Instance);
+                    const field_name = readString(frame);
+                    _ = try instance.fields.set(field_name, self.peek(0));
+                    const field_value = self.stack.pop();
+                    _ = self.stack.pop();
+                    self.stack.push(field_value);
                 },
                 .Equal => {
                     const rhs = self.stack.pop();
@@ -460,6 +510,10 @@ pub const VM = struct {
                     self.stack.push(result);
                     frame = &self.frames[self.frameCount - 1];
                 },
+                .Class => {
+                    const class = try Obj.Class.create(self, readString(frame));
+                    self.stack.push(Value.fromObj(&class.obj));
+                }
             }
         }
     }

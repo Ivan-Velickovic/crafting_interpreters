@@ -132,7 +132,7 @@ pub const GC = struct {
 
         if (debug_options.logGC) {
             // nocheckin
-            std.debug.print("address: {}\n", .{@ptrToInt(object)});
+            std.debug.print("address: {}\n", .{ @ptrToInt(object) });
             std.debug.print("{*} mark {s}\n", .{ object, Value.fromObj(object) });
         }
 
@@ -145,6 +145,15 @@ pub const GC = struct {
         }
 
         switch (object.objType) {
+            .Class => {
+                const class = object.asType(Obj.Class);
+                try self.markObject(&class.name.obj);
+            },
+            .Instance => {
+                const instance = object.asType(Obj.Instance);
+                try self.markObject(&instance.class.obj);
+                try self.markTable(&instance.fields);
+            },
             .Upvalue => try self.markValue(object.asType(Obj.Upvalue).closed),
             .Function => {
                 const function = object.asType(Obj.Function);

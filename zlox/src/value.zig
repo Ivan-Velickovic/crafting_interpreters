@@ -1,8 +1,10 @@
 const std = @import("std");
 const Obj = @import("object.zig").Obj;
+const Class = Obj.Class;
 const String = Obj.String;
 const Function = Obj.Function;
 const Closure = Obj.Closure;
+const Instance = Obj.Instance;
 
 const ValueType = enum {
     Bool,
@@ -61,11 +63,13 @@ pub const Value = union(ValueType) {
             .Obj => {
                 const obj = self.Obj;
                 switch (obj.objType) {
-                    .String => try writer.print("{s}", .{obj.asType(String).chars}),
+                    .Class => try writer.print("{s}", .{ obj.asType(Class).name.chars }),
+                    .String => try writer.print("{s}", .{ obj.asType(String).chars }),
                     .Function => {
                         const name = if (obj.asType(Function).name) |name| name.chars else "<script>";
                         try writer.print("<fn {s}>", .{name});
                     },
+                    .Instance => try writer.print("{s} instance", .{ obj.asType(Instance).class.name.chars }),
                     .Native => try writer.print("<native fn>", .{}),
                     .Closure => {
                         const name = if (obj.asType(Closure).function.name) |name| name.chars else "<script>";
