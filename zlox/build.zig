@@ -11,29 +11,34 @@ pub fn build(b: *std.build.Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
-    var debugAll = b.option(bool, "debug-all", "Run with all debug options set") orelse false;
-    var debugPrintCode = b.option(bool, "debug-print-code", "Print disassembled code") orelse false;
-    var debugTraceExecution = b.option(bool, "debug-trace-exec", "Print execution trace") orelse false;
-    var debugDetectMemLeaks = b.option(bool, "debug-detect-mem-leaks", "Detect memory leaks") orelse false;
+    var all = b.option(bool, "debug-all", "Run with all debug options set") orelse false;
+    var printCode = b.option(bool, "debug-print-code", "Print disassembled code") orelse false;
+    var traceExecution = b.option(bool, "debug-trace-exec", "Print execution trace") orelse false;
+    var detectMemLeaks = b.option(bool, "debug-detect-mem-leaks", "Detect internal compiler memory leaks") orelse false;
+    var logGC = b.option(bool, "debug-log-gc", "Log information when the GC is invoked") orelse false;
+    var stressGC = b.option(bool, "debug-stress-gc", "Invoke GC as often as possible") orelse false;
 
     const exe = b.addExecutable("zlox", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
 
-    const options = b.addOptions();
-    exe.addOptions("build_options", options);
+    const debugOptions = b.addOptions();
+    exe.addOptions("debug_options", debugOptions);
 
-    options.addOption(bool, "debugAll", debugAll);
-    // If the general debugAll option has been set then we set all debug
-    // sub-options to true.
-    if (debugAll) {
-        debugPrintCode = true;
-        debugTraceExecution = true;
-        debugDetectMemLeaks = true;
+    debugOptions.addOption(bool, "all", all);
+    // If the "all" option has been set then we set all debug sub-options to true.
+    if (all) {
+        printCode = true;
+        traceExecution = true;
+        detectMemLeaks = true;
+        logGC = true;
+        stressGC = true;
     }
-    options.addOption(bool, "debugPrintCode", debugPrintCode);
-    options.addOption(bool, "debugTraceExecution", debugTraceExecution);
-    options.addOption(bool, "debugDetectMemLeaks", debugDetectMemLeaks);
+    debugOptions.addOption(bool, "printCode", printCode);
+    debugOptions.addOption(bool, "traceExecution", traceExecution);
+    debugOptions.addOption(bool, "detectMemLeaks", detectMemLeaks);
+    debugOptions.addOption(bool, "logGC", logGC);
+    debugOptions.addOption(bool, "stressGC", stressGC);
 
     exe.install();
 

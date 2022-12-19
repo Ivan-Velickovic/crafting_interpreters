@@ -90,7 +90,7 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize) !usize {
             try stdout.print("{s: <16} {d: >4} {s}\n", .{"OP_CLOSURE", constant, chunk.constants.items[constant]});
 
             const function = chunk.constants.items[constant].Obj.asType(Obj.Function);
-            var i: @TypeOf(function.upvalueCount) = 0;
+            var i: usize = 0;
             while (i < function.upvalueCount) : (i += 1) {
                 const isLocal = chunk.code.items[nextOffset] == 1;
                 nextOffset += 1;

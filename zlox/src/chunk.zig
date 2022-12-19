@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Value = @import("value.zig").Value;
+const VM = @import("vm.zig").VM;
 
 pub const OpCode = enum(u8) {
     Constant,
@@ -58,8 +59,12 @@ pub const Chunk = struct {
         try self.lines.append(line);
     }
 
-    pub fn addConstant(self: *Chunk, value: Value) !usize {
+    pub fn addConstant(self: *Chunk, vm: *VM, value: Value) !usize {
+        // We need to be careful to make the GC aware of the Value in case the
+        // append causes the ArrayList to acquire more memory, hence invoking the GC.
+        vm.stack.push(value);
         try self.constants.append(value);
+        _ = vm.stack.pop();
 
         return self.constants.items.len - 1;
     }

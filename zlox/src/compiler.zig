@@ -1,6 +1,8 @@
 const std = @import("std");
+const debug_options = @import("debug_options");
 const debug = @import("debug.zig");
 const stderr = @import("main.zig").stderr;
+const GC = @import("memory.zig").GC;
 const VM = @import("vm.zig").VM;
 const InterpretError = @import("vm.zig").InterpretError;
 const Obj = @import("object.zig").Obj;
@@ -14,7 +16,7 @@ const OpCode = @import("chunk.zig").OpCode;
 // Note that this is only because the Zig compiler (at least in v0.8.0)
 // cannot infer recursive error union types, which becomes apparent
 // for functions like parsePrecedence.
-const CompilerError = error{OutOfMemory} || InterpretError || std.os.WriteError;
+const CompilerError = InterpretError || std.os.WriteError || std.mem.Allocator.Error;
 
 pub fn compile(source: []const u8, vm: *VM) !*Obj.Function {
     var compiler = try Compiler.create(vm, null, .Script);
@@ -110,7 +112,7 @@ pub const Compiler = struct {
     }
 };
 
-const Parser = struct {
+pub const Parser = struct {
     vm: *VM,
     compiler: *Compiler,
     scanner: Scanner,
@@ -135,8 +137,7 @@ const Parser = struct {
         try self.emitNilReturn();
         const function = self.compiler.function;
 
-        const debugPrintCode = @import("build_options").debugPrintCode;
-        if (debugPrintCode and !self.hadError) {
+        if (debug_options.printCode and !self.hadError) {
             const chunkName = if (function.name) |name| name.chars else "<script>";
             try debug.disassembleChunk(self.currentChunk(), chunkName);
         }
@@ -278,7 +279,7 @@ const Parser = struct {
     }
 
     fn makeConstant(self: *Parser, value: Value) !u8 {
-        const constantIndex = try self.currentChunk().addConstant(value);
+        const constantIndex = try self.currentChunk().addConstant(self.vm, value);
         if (constantIndex > std.math.maxInt(u8)) {
             try self.errorAtPrevious("Too many constants in one chunk.", .{});
             return 0;
@@ -595,7 +596,6 @@ const Parser = struct {
                     argCount += 1;
                 }
 
-
                 if (!try self.match(.Comma)) break;
             }
         }
@@ -652,7 +652,7 @@ const Parser = struct {
         const function = try self.end();
         try self.emitUnaryOp(.Closure, try self.makeConstant(Value.fromObj(&function.obj)));
 
-        var i: u9 = 0;
+        var i: usize = 0;
         while (i < function.upvalueCount) : (i += 1) {
             try self.emitByte(@boolToInt(compiler.upvalues[i].isLocal));
             try self.emitByte(compiler.upvalues[i].index);

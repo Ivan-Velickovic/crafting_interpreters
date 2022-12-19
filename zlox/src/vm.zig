@@ -1,8 +1,9 @@
 const std = @import("std");
-const buildOptions = @import("build_options");
+const debug_options = @import("debug_options");
 const compiler = @import("compiler.zig");
 const debug = @import("debug.zig");
 const main = @import("main.zig");
+const GC = @import("memory.zig").GC;
 const Compiler = @import("compiler.zig").Compiler;
 const Table = @import("table.zig").Table;
 const Value = @import("value.zig").Value;
@@ -37,23 +38,43 @@ pub const VM = struct {
     globals: Table,
     strings: Table,
     openUpvalues: ?*Obj.Upvalue,
+    bytesAllocated: usize,
+    nextGC: usize,
     objects: ?*Obj,
+    grayStack: std.ArrayList(*Obj),
 
-    pub fn create(allocator: Allocator) !VM {
+    pub fn create() VM {
         var vm = VM{
-            .allocator = allocator,
+            .allocator = undefined,
             .frames = undefined,
             .frameCount = 0,
-            .stack = try FixedCapacityStack(Value).create(allocator, STACK_MAX),
-            .globals = Table.create(allocator),
-            .strings = Table.create(allocator),
+            .stack = undefined,
+            .globals = undefined,
+            .strings = undefined,
             .openUpvalues = null,
+            .bytesAllocated = 0,
+            .nextGC = 1024 * 1024,
             .objects = null,
+            .grayStack = undefined,
         };
 
-        try vm.defineNative("clock", clockNative);
-
         return vm;
+    }
+
+    pub fn init(self: *VM, gc: *GC) !void {
+        const gc_allocator = gc.allocator();
+        self.allocator = gc_allocator;
+        self.stack = try FixedCapacityStack(Value).create(gc_allocator, STACK_MAX);
+        self.globals = Table.create(gc_allocator);
+        self.strings = Table.create(gc_allocator);
+        // Note that to keep track of the gray objects, we do not allocate from the GC,
+        // instead we surpass it by allocating straight from the internal allocator. This
+        // is so that the memory for the gray stack is not managed by the GC to prevent
+        // growing the gray stack causing recursive invocations of the GC if we were in
+        // the middle of a garbage collection.
+        self.grayStack = std.ArrayList(*Obj).init(gc.internalAllocator);
+
+        try self.defineNative("clock", clockNative);
     }
 
     pub fn destroy(self: *VM) void {
@@ -61,6 +82,7 @@ pub const VM = struct {
         self.globals.destroy();
         self.strings.destroy();
         self.freeObjects();
+        self.grayStack.deinit();
     }
 
     fn freeObjects(self: *VM) void {
@@ -88,7 +110,7 @@ pub const VM = struct {
     fn runtimeError(self: *VM, comptime fmt: []const u8, args: anytype) !void {
         try stderr.print(fmt ++ "\n", args);
 
-        var i: u8 = 0;
+        var i: usize = 0;
         while (i < self.frameCount) : (i += 1) {
             const frame = &self.frames[self.frameCount - 1 - i];
 
@@ -272,9 +294,16 @@ pub const VM = struct {
         self.stack.push(Value.fromNumber(result));
     }
 
+    // nocheckin: push back onto the stack or just do the peek/pop in here?
     fn concatenate(self: *VM, a: *String, b: *String) !void {
+        self.stack.push(Value.fromObj(&a.obj));
+        self.stack.push(Value.fromObj(&b.obj));
+
         const slices = [_][]const u8 {a.chars, b.chars};
         const concatenatedChars = try std.mem.concat(self.allocator, u8, &slices);
+
+        _ = self.stack.pop();
+        _ = self.stack.pop();
 
         const result = try String.take(self, concatenatedChars);
         self.stack.push(Value.fromObj(&result.obj));
@@ -284,7 +313,7 @@ pub const VM = struct {
         var frame = &self.frames[self.frameCount - 1];
 
         while (true) {
-            if (buildOptions.debugTraceExecution) {
+            if (debug_options.traceExecution) {
                 try stdout.print("          ", .{});
                 for (self.stack.items) |value| {
                     try stdout.print("[ {} ]", .{value});
@@ -397,7 +426,7 @@ pub const VM = struct {
                     const closure = try Obj.Closure.create(self, function);
                     self.stack.push(Value.fromObj(&closure.obj));
 
-                    var i: u9 = 0;
+                    var i: usize = 0;
                     while (i < function.upvalueCount) : (i += 1) {
                         const isLocal = readByte(frame) == 1;
                         const index = readByte(frame);

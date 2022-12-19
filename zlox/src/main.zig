@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const buildOptions = @import("build_options");
+const debug_options = @import("debug_options");
+const GC = @import("memory.zig").GC;
 const VM = @import("vm.zig").VM;
 const InterpretError = @import("vm.zig").InterpretError;
 const scanner = @import("scanner.zig");
@@ -10,37 +11,55 @@ const Allocator = std.mem.Allocator;
 pub const stdout = std.io.getStdOut().writer();
 pub const stderr = std.io.getStdErr().writer();
 
-pub fn main() !void {
-    if (buildOptions.debugPrintCode)       std.log.info("Print code option set.", .{});
-    if (buildOptions.debugTraceExecution)  std.log.info("Trace execution option set.", .{});
-    if (buildOptions.debugDetectMemLeaks)  std.log.info("Detect memory leaks option set.", .{});
-    if (buildOptions.debugAll)             std.log.info("Running with all debug options set.\n", .{});
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+const gpa_alloc = gpa.allocator();
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+// nocheckin: CTRL+D on repl causes error.
+// nocheckin: convention is that varibales have _ instead of camel case.
+// nocheckin: figure out this init vs create shit once and for all.
+// nocheckin: figure out whether or not debug messages should go to stderr instead of stdout? eg it makes sense to use std.log
+// to log stuff for GC.
+pub fn main() !void {
+    if (debug_options.printCode)        std.log.info("[debug option set] Print code", .{});
+    if (debug_options.traceExecution)   std.log.info("[debug option set] Trace execution", .{});
+    if (debug_options.detectMemLeaks)   std.log.info("[debug option set] Detect compiler memory leaks option set", .{});
+    if (debug_options.logGC)            std.log.info("[debug option set] Log garbage collections", .{});
+    if (debug_options.stressGC)         std.log.info("[debug option set] Invoke GC as much as possible", .{});
+    if (debug_options.all)              std.log.info("Running with all debug options set.\n", .{});
+
+    // nocheckin: come back to this, recheck all the allocators and how they're used in this file
     // We don't do anything with whether or not there were leaks since
     // something would have been printed by the deinit funciton anyways.
+    // defer _ = gpa.detectLeaks();
     defer _ = gpa.deinit();
-    if (buildOptions.debugDetectMemLeaks) _ = gpa.detectLeaks();
 
-    const args = try process.argsAlloc(gpa.allocator());
-    defer process.argsFree(gpa.allocator(), args);
+    // nocheckin: explain vm create vs init
+    var vm = VM.create();
+    defer vm.destroy();
+
+    // if (debug_options.detectMemLeaks) _ = gpa.detectLeaks();
+
+    var gc: GC = undefined;
+    GC.init(&gc, &vm, gpa_alloc);
+
+    try vm.init(&gc);
+
+    const args = try process.argsAlloc(gpa_alloc);
+    defer process.argsFree(gpa_alloc, args);
 
     switch (args.len) {
-        1 => try repl(gpa.allocator()),
-        2 => try runFile(gpa.allocator(), args[1]),
+        1 => try repl(&vm),
+        2 => try runFile(&vm, args[1]),
         else => {
-            try stdout.print("Usage: lox [path]\n", .{});
-            process.exit(64);
+            std.debug.print("Usage: lox [path]\n", .{});
+            process.exit(64); // command-line usage error code nocheckin: comment all the other codes cos idk what the fuck they mean.
         },
     }
 }
 
-fn runFile(allocator: Allocator, path: []const u8) !void {
-    const source = try readFile(allocator, path);
-    defer allocator.free(source);
-
-    var vm = try VM.create(allocator);
-    defer vm.destroy();
+fn runFile(vm: *VM, path: []const u8) !void {
+    const source = try readFile(gpa_alloc, path);
+    defer gpa_alloc.free(source);
 
     vm.interpret(source) catch |err| {
         if (err == InterpretError.CompileError) std.process.exit(65);
@@ -57,8 +76,7 @@ fn readFile(allocator: Allocator, path: []const u8) ![]const u8 {
     };
     defer file.close();
 
-    const fileStat = try file.stat();
-    const fileSize = fileStat.size;
+    const fileSize = (try file.stat()).size;
 
     const buffer = try allocator.alloc(u8, fileSize);
     const bytesRead = try file.read(buffer);
@@ -71,10 +89,7 @@ fn readFile(allocator: Allocator, path: []const u8) ![]const u8 {
     return buffer;
 }
 
-fn repl(allocator: Allocator) !void {
-    var vm = try VM.create(allocator);
-    defer vm.destroy();
-
+fn repl(vm: *VM) !void {
     var line: [1024]u8 = undefined;
     while (true) {
         try stdout.print("> ", .{});

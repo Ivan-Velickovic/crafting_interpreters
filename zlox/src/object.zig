@@ -1,4 +1,5 @@
 const std = @import("std");
+const debug_options = @import("debug_options");
 const Compiler = @import("compiler.zig").Compiler;
 const VM = @import("vm.zig").VM;
 const Value = @import("value.zig").Value;
@@ -6,26 +7,36 @@ const Chunk = @import("chunk.zig").Chunk;
 
 pub const Obj = struct {
     objType: Type,
+    isMarked: bool,
     next: ?*Obj,
 
     const Type = enum {
         String, Function, Native, Closure, Upvalue,
     };
 
-    fn create(vm: *VM, comptime T: type, comptime objType: Type) !*Obj {
+    fn allocate(vm: *VM, comptime T: type, comptime objType: Type) !*Obj {
         const ptr = try vm.allocator.create(T);
 
         ptr.obj = Obj{
             .objType = objType,
+            .isMarked = false,
             .next = vm.objects,
         };
 
         vm.objects = &ptr.obj;
 
+        if (debug_options.logGC) {
+            std.debug.print("{*} allocate {d} for {s}\n", .{ &ptr.obj, @sizeOf(T), objType });
+        }
+
         return &ptr.obj;
     }
 
     pub fn destroy(self: *Obj, vm: *VM) void {
+        if (debug_options.logGC) {
+            std.debug.print("{*} free type {s}\n", .{ self, self.objType });
+        }
+
         switch (self.objType) {
             .String => self.asType(String).destroy(vm),
             .Function => self.asType(Function).destroy(vm),
@@ -50,7 +61,7 @@ pub const Obj = struct {
         next: ?*Upvalue,
 
         pub fn create(vm: *VM, slot: *Value) !*Upvalue {
-            const obj = try Obj.create(vm, Upvalue, .Upvalue);
+            const obj = try Obj.allocate(vm, Upvalue, .Upvalue);
             const upvalue = obj.asType(Upvalue);
             upvalue.* = Upvalue{
                 .obj = obj.*,
@@ -71,10 +82,10 @@ pub const Obj = struct {
     pub const Closure = struct {
         obj: Obj,
         function: *Function,
-        upvalues: std.ArrayList(*Upvalue),
+        upvalues: std.ArrayList(*Upvalue), // nocheckin: explain why an arraylist is used.
 
         pub fn create(vm: *VM, function: *Function) !*Closure {
-            const obj = try Obj.create(vm, Closure, .Closure);
+            const obj = try Obj.allocate(vm, Closure, .Closure);
             const closure = obj.asType(Closure);
             closure.* = Closure{
                 .obj = obj.*,
@@ -100,7 +111,7 @@ pub const Obj = struct {
         function: Fn,
 
         pub fn create(vm: *VM, function: Fn) !*Native {
-            const obj = try Obj.create(vm, Native, .Native);
+            const obj = try Obj.allocate(vm, Native, .Native);
             const native = obj.asType(Native);
             native.* = Native{
                 .obj = obj.*,
@@ -122,10 +133,10 @@ pub const Obj = struct {
         arity: u16, // While the max arity is the max int of u8, we still want to compile even if the source reaches this limit.
         upvalueCount: u9,
         chunk: Chunk,
-        name: ?*String,
+        name: ?*String, // nocheckin: explain why this name has to be an optional
 
         pub fn create(vm: *VM) !*Function {
-            const obj = try Obj.create(vm, Function, .Function);
+            const obj = try Obj.allocate(vm, Function, .Function);
             const function = obj.asType(Function);
             function.* = Function{
                 .obj = obj.*,
@@ -173,7 +184,7 @@ pub const Obj = struct {
         }
 
         fn create(vm: *VM, chars: []const u8, stringHash: u32) !*String {
-            const obj = try Obj.create(vm, String, .String);
+            const obj = try Obj.allocate(vm, String, .String);
             const string = obj.asType(String);
             string.* = String{
                 .obj = obj.*,
@@ -181,7 +192,11 @@ pub const Obj = struct {
                 .hash = stringHash,
             };
 
+            // Inserting into the table could trigger an allocation so we
+            // push the string onto the value stack to make the GC aware of it.
+            vm.stack.push(Value.fromObj(&string.obj));
             _ = try vm.strings.set(string, Value.nil());
+            _ = vm.stack.pop();
 
             return string;
         }
@@ -193,10 +208,10 @@ pub const Obj = struct {
 
         fn hash(chars: []const u8) u32 {
             var hashValue: u32 = 2166136261;
-            var i: u32 = 0;
+            var i: usize = 0;
             while (i < chars.len) : (i += 1) {
                 hashValue ^= @intCast(u8, chars[i]);
-                _ = @mulWithOverflow(u32, hashValue, 16777619, &hashValue);
+                hashValue *%= 16777619;
             }
 
             return hashValue;
