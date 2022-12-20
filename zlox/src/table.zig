@@ -1,4 +1,5 @@
 const std = @import("std");
+const debug = @import("debug.zig");
 const Obj = @import("object.zig").Obj;
 const GC = @import("memory.zig").GC;
 const Value = @import("value.zig").Value;
@@ -138,8 +139,18 @@ pub const Table = struct {
     pub fn addAll(from: *Table, to: *Table) !void {
         for (from.entries) |entry| {
             if (entry.key) |key| {
-                to.set(key, entry.value);
+                _ = try to.set(key, entry.value);
             }
         }
+    }
+
+    pub fn print(self: *Table) void {
+        debug.print("== Printing table entries ==\n", .{});
+        for (self.entries) |entry| {
+            if (entry.key) |key| {
+                debug.print("{s} -> {s}\n", .{ key.chars, entry.value });
+            }
+        }
+        debug.print("============================\n", .{});
     }
 };

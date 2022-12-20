@@ -1,8 +1,15 @@
 const std = @import("std");
+const debug_options = @import("debug_options");
 const stdout = @import("main.zig").stdout;
 const Chunk = @import("chunk.zig").Chunk;
 const OpCode = @import("chunk.zig").OpCode;
 const Obj = @import("object.zig").Obj;
+
+pub fn print(comptime fmt: []const u8, args: anytype) void {
+    if (debug_options.debug_prints) {
+        std.debug.print(fmt, args);
+    }
+}
 
 pub fn disassembleChunk(chunk: *Chunk, name: []const u8) !void {
     try stdout.print("== {s} ==\n", .{name});
@@ -79,6 +86,7 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize) !usize {
         .SetUpvalue => byteInstruction("OP_SET_UPVALUE", chunk, offset),
         .GetProperty => constantInstruction("OP_GET_PROPERTY", chunk, offset),
         .SetProperty => constantInstruction("OP_SET_PROPERTY", chunk, offset),
+        .GetSuper => constantInstruction("OP_GET_SUPER", chunk, offset),
         .Greater => simpleInstruction("OP_GREATER", offset),
         .Less => simpleInstruction("OP_LESS", offset),
         .Add => simpleInstruction("OP_ADD", offset),
@@ -93,6 +101,7 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize) !usize {
         .Loop => jumpInstruction("OP_LOOP", -1, chunk, offset),
         .Call => byteInstruction("OP_CALL", chunk, offset),
         .Invoke => invokeInstruction("OP_INVOKE", chunk, offset),
+        .SuperInvoke => invokeInstruction("OP_SUPER_INVOKE", chunk, offset),
         .Closure => {
             var nextOffset = offset + 1;
 
@@ -117,6 +126,7 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize) !usize {
         .CloseUpvalue => simpleInstruction("OP_CLOSE_UPVALUE", offset),
         .Return => simpleInstruction("OP_RETURN", offset),
         .Class => constantInstruction("OP_CLASS", chunk, offset),
+        .Inherit => simpleInstruction("OP_INHERIT", offset),
         .Method => constantInstruction("OP_METHOD", chunk, offset),
     };
 }

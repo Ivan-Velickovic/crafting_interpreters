@@ -27,7 +27,7 @@ pub const Obj = struct {
         vm.objects = &ptr.obj;
 
         if (debug_options.log_gc) {
-            std.debug.print("{*} allocate {d} for {s}\n", .{ &ptr.obj, @sizeOf(T), obj_type });
+            std.debug.print("{*} allocate {d} for {s}\n", .{ &ptr.obj, @sizeOf(T), @tagName(obj_type) });
         }
 
         return &ptr.obj;
@@ -35,7 +35,7 @@ pub const Obj = struct {
 
     pub fn destroy(self: *Obj, vm: *VM) void {
         if (debug_options.log_gc) {
-            std.debug.print("{*} free type {s}\n", .{ self, self.obj_type });
+            std.debug.print("{*} free type {s}\n", .{ self, @tagName(self.obj_type) });
         }
 
         switch (self.obj_type) {

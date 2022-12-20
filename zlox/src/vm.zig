@@ -258,8 +258,8 @@ pub const VM = struct {
         }
     }
 
-    fn bindMethod(self: *VM, class: *Class, name: *String) !bool {
-        if (class.methods.get(name)) |method| {
+    fn bindMethod(self: *VM, class: *Class, method_name: *String) !void {
+        if (class.methods.get(method_name)) |method| {
             // We grab the receiver of the bound method (the instance), which is
             // implemented as a closure, from the top of the stack. We then pop off
             // the instance and then replace the top of the stack with the bound
@@ -267,10 +267,9 @@ pub const VM = struct {
             const bound_method = try Obj.BoundMethod.create(self, self.peek(0), method.Obj.asType(Closure));
             _ = self.stack.pop();
             self.stack.push(Value.fromObj(&bound_method.obj));
-            return true;
         } else {
-            try self.runtimeError("Undefined property '{s}'.", .{ name.chars });
-            return false;
+            try self.runtimeError("Undefined property '{s}'.", .{ method_name.chars });
+            return InterpretError.RuntimeError;
         }
     }
 
@@ -472,9 +471,7 @@ pub const VM = struct {
                         _ = self.stack.pop(); // Pop the instance.
                         self.stack.push(value.*);
                     } else {
-                        if (!try self.bindMethod(instance.class, field_name)) {
-                            return InterpretError.RuntimeError;
-                        }
+                        try self.bindMethod(instance.class, field_name);
                     }
                 },
                 .SetProperty => {
@@ -502,6 +499,12 @@ pub const VM = struct {
                     const field_value = self.stack.pop();
                     _ = self.stack.pop();
                     self.stack.push(field_value);
+                },
+                .GetSuper => {
+                    const method_name = readString(frame);
+                    const superclass = self.stack.pop().Obj.asType(Class);
+
+                    try self.bindMethod(superclass, method_name);
                 },
                 .Equal => {
                     const rhs = self.stack.pop();
@@ -557,9 +560,17 @@ pub const VM = struct {
                     frame = &self.frames[self.frame_count - 1];
                 },
                 .Invoke => {
-                    const method = readString(frame);
+                    const method_name = readString(frame);
                     const arg_count = readByte(frame);
-                    try self.invoke(method, arg_count);
+                    try self.invoke(method_name, arg_count);
+
+                    frame = &self.frames[self.frame_count - 1];
+                },
+                .SuperInvoke => {
+                    const method_name = readString(frame);
+                    const arg_count = readByte(frame);
+                    const superclass = self.stack.pop().Obj.asType(Class);
+                    try self.invokeFromClass(superclass, method_name, arg_count);
 
                     frame = &self.frames[self.frame_count - 1];
                 },
@@ -605,6 +616,20 @@ pub const VM = struct {
                 .Class => {
                     const class = try Class.create(self, readString(frame));
                     self.stack.push(Value.fromObj(&class.obj));
+                },
+                .Inherit => {
+                    const superclass = self.peek(1);
+                    if (!Obj.isType(superclass, .Class)) {
+                        try self.runtimeError("Superclass must be a class.", .{});
+                        return InterpretError.RuntimeError;
+                    }
+                    const subclass = self.peek(0).Obj.asType(Class);
+                    // We want to take all the methods from the superclass, and
+                    // add it to the methods table to the subclass.
+                    // TODO: won't the superclass methods override the subclass methods
+                    // if there is an overlap?
+                    try superclass.Obj.asType(Class).methods.addAll(&subclass.methods);
+                    _ = self.stack.pop(); // Pop the subclass.
                 },
                 .Method => {
                     try self.defineMethod(readString(frame));

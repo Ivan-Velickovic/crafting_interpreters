@@ -18,6 +18,7 @@ pub const OpCode = enum(u8) {
     SetUpvalue,
     GetProperty,
     SetProperty,
+    GetSuper,
     Equal,
     Greater,
     Less,
@@ -32,11 +33,13 @@ pub const OpCode = enum(u8) {
     JumpIfFalse,
     Call,
     Invoke,
+    SuperInvoke,
     Closure,
     Loop,
     CloseUpvalue,
     Return,
     Class,
+    Inherit,
     Method,
 };
 

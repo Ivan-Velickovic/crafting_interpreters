@@ -121,6 +121,7 @@ pub const Compiler = struct {
 
 const ClassCompiler = struct {
     enclosing: ?*ClassCompiler,
+    has_superclass: bool = false,
 };
 
 pub const Parser = struct {
@@ -346,18 +347,18 @@ pub const Parser = struct {
         return -1;
     }
 
-    fn addLocal(self: *Parser, compiler: *Compiler, name: []const u8) !void {
-        if (compiler.local_count == Compiler.MAX_LOCALS) {
+    fn addLocal(self: *Parser, name: []const u8) !void {
+        if (self.compiler.local_count == Compiler.MAX_LOCALS) {
             try self.errorAtPrevious("Too many local variables in function.", .{});
             return;
         }
 
-        compiler.locals[compiler.local_count] = Local{
+        self.compiler.locals[self.compiler.local_count] = Local{
             .name = name,
             .is_captured = false,
             .depth = -1,
         };
-        compiler.local_count += 1;
+        self.compiler.local_count += 1;
     }
 
     fn resolveUpvalue(self: *Parser, compiler: *Compiler, name: []const u8) CompilerError!isize {
@@ -415,7 +416,7 @@ pub const Parser = struct {
             }
         }
 
-        try self.addLocal(self.compiler, self.previous.lexeme);
+        try self.addLocal(self.previous.lexeme);
     }
 
     fn binary(self: *Parser) !void {
@@ -503,15 +504,15 @@ pub const Parser = struct {
         var set_op: OpCode = undefined;
         var arg: u8 = undefined;
 
-        const resolveLocalArg = try self.resolveLocal(self.compiler, name);
-        if (resolveLocalArg != -1) {
-            arg = @intCast(u8, resolveLocalArg);
+        const resolve_local_arg = try self.resolveLocal(self.compiler, name);
+        if (resolve_local_arg != -1) {
+            arg = @intCast(u8, resolve_local_arg);
             get_op = .GetLocal;
             set_op = .SetLocal;
         } else {
-            const resolveUpvalueArg = try self.resolveUpvalue(self.compiler, name);
-            if (resolveUpvalueArg != -1) {
-                arg = @intCast(u8, resolveUpvalueArg);
+            const resolve_upvalue_arg = try self.resolveUpvalue(self.compiler, name);
+            if (resolve_upvalue_arg != -1) {
+                arg = @intCast(u8, resolve_upvalue_arg);
                 get_op = .GetUpvalue;
                 set_op = .SetUpvalue;
             } else {
@@ -531,6 +532,29 @@ pub const Parser = struct {
 
     fn variable(self: *Parser, can_assign: bool) !void {
         try self.namedVariable(self.previous.lexeme, can_assign);
+    }
+
+    fn super(self: *Parser) !void {
+        if (self.current_class == null) {
+            try self.errorAtPrevious("Can't use 'super' outside of a class.", .{});
+        } else if (!self.current_class.?.has_superclass) {
+            try self.errorAtPrevious("Can't use 'super' in a class with no superclass.", .{});
+        }
+
+        try self.consume(.Dot, "Expect '.' after 'super'.");
+        try self.consume(.Identifier, "Expect superclass method name.");
+        const method_name = try self.identifierConstant(self.previous.lexeme);
+
+        try self.namedVariable("this", false);
+        if (try self.match(.LeftParen)) {
+            const arg_count = try self.argumentList();
+            try self.namedVariable("super", false);
+            try self.emitUnaryOp(.SuperInvoke, method_name);
+            try self.emitByte(arg_count);
+        } else {
+            try self.namedVariable("super", false);
+            try self.emitUnaryOp(.GetSuper, method_name);
+        }
     }
 
     fn this(self: *Parser) !void {
@@ -561,6 +585,7 @@ pub const Parser = struct {
             .String => try self.string(),
             .Number => try self.number(),
             .False, .True, .Nil => try self.literal(),
+            .Super => try self.super(),
             .This => try self.this(),
             else => try self.prefixError(),
         }
@@ -729,6 +754,24 @@ pub const Parser = struct {
         var class_compiler: ClassCompiler = .{ .enclosing = self.current_class };
         self.current_class = &class_compiler;
 
+        if (try self.match(.Less)) {
+            // Deal with class inheritance
+            try self.consume(.Identifier, "Expect superclass name.");
+            try self.variable(false);
+
+            if (std.mem.eql(u8, class_name, self.previous.lexeme)) {
+                try self.errorAtPrevious("A class can't inherit from itself.", .{});
+            }
+
+            self.beginScope();
+            try self.addLocal("super");
+            try self.defineVariable(0);
+
+            try self.namedVariable(class_name, false);
+            try self.emitOp(.Inherit);
+            self.current_class.?.has_superclass = true;
+        }
+
         try self.namedVariable(class_name, false);
         try self.consume(.LeftBrace, "Expect '{' before class body.");
         while (!self.check(.RightBrace) and !self.check(.EOF)) {
@@ -738,6 +781,10 @@ pub const Parser = struct {
         // Once we've reached the end of the methods, we no longer need the
         // class and so we can pop it off the stack.
         try self.emitOp(.Pop);
+
+        if (self.current_class.?.has_superclass) {
+            try self.endScope();
+        }
 
         self.current_class = self.current_class.?.enclosing;
     }
