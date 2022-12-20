@@ -13,7 +13,6 @@ pub const GC = struct {
 
     vm: *VM,
     internalAllocator: Allocator, // This is what we use to actually allocate on the heap
-    // allocator: Allocator, // This is the allocator that zlox uses, memory allocated with this gets garbage collected
 
     pub fn init(self: *GC, vm: *VM, internalAllocator: Allocator) void {
         self.vm = vm;
@@ -67,7 +66,7 @@ pub const GC = struct {
 
     fn collectGarbage(self: *GC) !void {
         if (debug_options.logGC) {
-            // nocheckin: we can't do "try stdout.print" here since collectGarbage is used in the allocator functions and they must
+            // TODO: we can't do "try stdout.print" here since collectGarbage is used in the allocator functions and they must
             // return Allocator.Error set
             std.debug.print("-- GC begin\n", .{});
             const before = self.vm.bytesAllocated;
@@ -98,10 +97,11 @@ pub const GC = struct {
 
         try self.markTable(&self.vm.globals);
         try self.markCompilerRoots();
+        try self.markObject(&self.vm.init_string.?.obj);
     }
 
     fn markCompilerRoots(self: *GC) !void {
-        // nocheckin: make note that if a GC occurs after the final "end" of a compiler, it may cause a double mark?
+        // TODO: make note that if a GC occurs after the final "end" of a compiler, it may cause a double mark?
         var currCompiler: ?*Compiler = @fieldParentPtr(Parser, "vm", &self.vm).compiler;
         while (currCompiler) |compiler| {
             try self.markObject(&compiler.function.obj);
@@ -109,7 +109,7 @@ pub const GC = struct {
         }
     }
 
-    // nocheckin: put this in Value.zig/Object.zig?
+    // TODO: put this in Value.zig/Object.zig?
     fn markValue(self: *GC, value: Value) !void {
         if (value == .Obj) try self.markObject(value.Obj);
     }
@@ -131,7 +131,7 @@ pub const GC = struct {
         if (object.isMarked) return;
 
         if (debug_options.logGC) {
-            // nocheckin
+            // TODO
             std.debug.print("address: {}\n", .{ @ptrToInt(object) });
             std.debug.print("{*} mark {s}\n", .{ object, Value.fromObj(object) });
         }
@@ -145,9 +145,15 @@ pub const GC = struct {
         }
 
         switch (object.objType) {
+            .BoundMethod => {
+                const bound_method = object.asType(Obj.BoundMethod);
+                try self.markValue(bound_method.receiver);
+                try self.markObject(&bound_method.method.obj);
+            },
             .Class => {
                 const class = object.asType(Obj.Class);
                 try self.markObject(&class.name.obj);
+                try self.markTable(&class.methods);
             },
             .Instance => {
                 const instance = object.asType(Obj.Instance);

@@ -21,6 +21,14 @@ fn constantInstruction(name: []const u8, chunk: *Chunk, offset: usize) !usize {
     return offset + 2;
 }
 
+fn invokeInstruction(name: []const u8, chunk: *Chunk, offset: usize) !usize {
+    const constant = chunk.code[offset + 1];
+    const arg_count = chunk.code[offset + 2];
+    try stdout.print("{s:-<16} ({d} args) '{s: >4} '{}'", .{ name, arg_count, constant, chunk.constants.values[constant] });
+
+    return offset + 3;
+}
+
 fn simpleInstruction(name: []const u8, offset: usize) !usize {
     try stdout.print("{s}\n", .{name});
 
@@ -84,6 +92,7 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize) !usize {
         .JumpIfFalse => jumpInstruction("OP_JUMP_IF_FALSE", 1, chunk, offset),
         .Loop => jumpInstruction("OP_LOOP", -1, chunk, offset),
         .Call => byteInstruction("OP_CALL", chunk, offset),
+        .Invoke => invokeInstruction("OP_INVOKE", chunk, offset),
         .Closure => {
             var nextOffset = offset + 1;
 
@@ -108,5 +117,6 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize) !usize {
         .CloseUpvalue => simpleInstruction("OP_CLOSE_UPVALUE", offset),
         .Return => simpleInstruction("OP_RETURN", offset),
         .Class => constantInstruction("OP_CLASS", chunk, offset),
+        .Method => constantInstruction("OP_METHOD", chunk, offset),
     };
 }

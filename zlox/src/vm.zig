@@ -10,8 +10,14 @@ const Value = @import("value.zig").Value;
 const Chunk = @import("chunk.zig").Chunk;
 const OpCode = @import("chunk.zig").OpCode;
 const Obj = @import("object.zig").Obj;
-const String = Obj.String;
+const BoundMethod = Obj.BoundMethod;
+const Class = Obj.Class;
+const Closure = Obj.Closure;
+const Function = Obj.Function;
 const Instance = Obj.Instance;
+const Native = Obj.Native;
+const String = Obj.String;
+const Upvalue = Obj.Upvalue;
 const FixedCapacityStack = @import("stack.zig").FixedCapacityStack;
 const Allocator = std.mem.Allocator;
 const stdout = main.stdout;
@@ -25,7 +31,8 @@ pub const InterpretError = error{
 pub const CallFrame = struct {
     closure: *Obj.Closure,
     ip: usize,
-    start: usize, // Index into the VM stack where values for this CallFrame start.
+    /// Index into the VM stack where values for this CallFrame start.
+    start: usize,
 };
 
 pub const VM = struct {
@@ -38,13 +45,14 @@ pub const VM = struct {
     stack: FixedCapacityStack(Value),
     globals: Table,
     strings: Table,
-    openUpvalues: ?*Obj.Upvalue,
+    init_string: ?*String,
+    openUpvalues: ?*Upvalue,
     bytesAllocated: usize,
     nextGC: usize,
     objects: ?*Obj,
     grayStack: std.ArrayList(*Obj),
 
-    pub fn create() VM {
+    pub fn create() !VM {
         var vm = VM{
             .allocator = undefined,
             .frames = undefined,
@@ -52,6 +60,7 @@ pub const VM = struct {
             .stack = undefined,
             .globals = undefined,
             .strings = undefined,
+            .init_string = null,
             .openUpvalues = null,
             .bytesAllocated = 0,
             .nextGC = 1024 * 1024,
@@ -75,6 +84,8 @@ pub const VM = struct {
         // the middle of a garbage collection.
         self.grayStack = std.ArrayList(*Obj).init(gc.internalAllocator);
 
+        self.init_string = try String.copy(self, "init");
+
         try self.defineNative("clock", clockNative);
     }
 
@@ -82,6 +93,7 @@ pub const VM = struct {
         self.stack.destroy();
         self.globals.destroy();
         self.strings.destroy();
+        self.init_string = null;
         self.freeObjects();
         self.grayStack.deinit();
     }
@@ -130,13 +142,13 @@ pub const VM = struct {
         self.resetStack();
     }
 
-    fn defineNative(self: *VM, name: []const u8, function: Obj.Native.Fn) !void {
-        const nameObj = &(try Obj.String.copy(self, name)).obj;
+    fn defineNative(self: *VM, name: []const u8, function: Native.Fn) !void {
+        const nameObj = &(try String.copy(self, name)).obj;
         self.stack.push(Value.fromObj(nameObj));
-        const functionObj = &(try Obj.Native.create(self, function)).obj;
+        const functionObj = &(try Native.create(self, function)).obj;
         self.stack.push(Value.fromObj(functionObj));
 
-        _ = try self.globals.set(self.stack.items[0].Obj.asType(Obj.String), self.stack.items[1]);
+        _ = try self.globals.set(self.stack.items[0].Obj.asType(String), self.stack.items[1]);
         _ = self.stack.pop();
         _ = self.stack.pop();
     }
@@ -151,9 +163,9 @@ pub const VM = struct {
         return self.stack.items[self.stack.items.len - distance - 1];
     }
 
-    fn call(self: *VM, closure: *Obj.Closure, argCount: u8) !void {
-        if (argCount != closure.function.arity) {
-            try self.runtimeError("Expected {d} arguments but got {d}.", .{closure.function.arity, argCount});
+    fn call(self: *VM, closure: *Closure, arg_count: u8) !void {
+        if (arg_count != closure.function.arity) {
+            try self.runtimeError("Expected {d} arguments but got {d}.", .{ closure.function.arity, arg_count });
             return InterpretError.RuntimeError;
         }
 
@@ -168,26 +180,40 @@ pub const VM = struct {
             // We want the slots to start from the beggining of the bytecode
             // for a function call, so we start one before its arguments since
             // that also includes the name of the function.
-            .start = self.stack.items.len - argCount - 1,
+            .start = self.stack.items.len - arg_count - 1,
         };
         self.frameCount += 1;
     }
 
-    fn callValue(self: *VM, callee: Value, argCount: u8) !void {
+    fn callValue(self: *VM, callee: Value, arg_count: u8) !void {
         if (callee == .Obj) {
             switch (callee.Obj.objType) {
+                .BoundMethod => {
+                    const bound_method = callee.Obj.asType(BoundMethod);
+                    self.stack.items[self.stack.items.len - arg_count - 1] = bound_method.receiver;
+                    return try self.call(bound_method.method, arg_count);
+                },
                 .Class => {
-                    const class = callee.Obj.asType(Obj.Class);
+                    const class = callee.Obj.asType(Class);
                     const instance = try Obj.Instance.create(self, class);
-                    self.stack.items[self.stack.items.len - argCount - 1] = Value.fromObj(&instance.obj);
+                    self.stack.items[self.stack.items.len - arg_count - 1] = Value.fromObj(&instance.obj);
+                    if (class.methods.get(self.init_string.?)) |initialiser| {
+                        return try self.call(initialiser.Obj.asType(Closure), arg_count);
+                    } else if (arg_count != 0) {
+                        // If we do not find an initialiser for the class and
+                        // we do not expect to get a class being called with
+                        // arguments.
+                        try self.runtimeError("Expected 0 arguments but got {}.", .{ arg_count });
+                        return InterpretError.RuntimeError;
+                    }
                     return;
                 },
-                .Closure => return try self.call(callee.Obj.asType(Obj.Closure), argCount),
+                .Closure => return try self.call(callee.Obj.asType(Closure), arg_count),
                 .Native => {
-                    const native = callee.Obj.asType(Obj.Native).function;
-                    const result = native(argCount, self.stack.items[self.stack.items.len - argCount..]);
+                    const native = callee.Obj.asType(Native).function;
+                    const result = native(arg_count, self.stack.items[self.stack.items.len - arg_count..]);
 
-                    self.stack.resize(self.stack.items.len - argCount + 1);
+                    self.stack.resize(self.stack.items.len - arg_count + 1);
                     self.stack.push(result);
 
                     return;
@@ -201,8 +227,53 @@ pub const VM = struct {
         return InterpretError.RuntimeError;
     }
 
-    fn captureUpvalue(self: *VM, local: *Value) !*Obj.Upvalue {
-        var prevUpvalue: ?*Obj.Upvalue = null;
+    fn invokeFromClass(self: *VM, class: *Class, method_name: *String, arg_count: u8) !void {
+        if (class.methods.get(method_name)) |method| {
+            try self.call(method.Obj.asType(Closure), arg_count);
+        } else {
+            try self.runtimeError("Undefined property '{s}'.", .{ method_name.chars });
+            return InterpretError.RuntimeError;
+        }
+    }
+
+    fn invoke(self: *VM, method_name: *String, arg_count: u8) !void {
+        const receiver = self.peek(arg_count);
+        if (!Obj.isType(receiver, .Instance)) {
+            try self.runtimeError("Only instances have methods.", .{});
+            return InterpretError.RuntimeError;
+        }
+
+        const instance = receiver.Obj.asType(Instance);
+
+        // The method_name could actually be a field and not a method, so first
+        // we need to check whether the field exists and if so, check if it is
+        // the kind value we can call.
+        if (instance.fields.get(method_name)) |value| {
+            self.stack.items[self.stack.items.len - arg_count - 1] = value.*;
+            try self.callValue(value.*, arg_count);
+        } else {
+            try self.invokeFromClass(instance.class, method_name, arg_count);
+        }
+    }
+
+    fn bindMethod(self: *VM, class: *Class, name: *String) !bool {
+        if (class.methods.get(name)) |method| {
+            // We grab the receiver of the bound method (the instance), which is
+            // implemented as a closure, from the top of the stack. We then pop off
+            // the instance and then replace the top of the stack with the bound
+            // method we just created.
+            const bound_method = try Obj.BoundMethod.create(self, self.peek(0), method.Obj.asType(Closure));
+            _ = self.stack.pop();
+            self.stack.push(Value.fromObj(&bound_method.obj));
+            return true;
+        } else {
+            try self.runtimeError("Undefined property '{s}'.", .{ name.chars });
+            return false;
+        }
+    }
+
+    fn captureUpvalue(self: *VM, local: *Value) !*Upvalue {
+        var prevUpvalue: ?*Upvalue = null;
         var currUpvalue = self.openUpvalues;
         while (currUpvalue) |upvalue| {
             // Since open upvalues are ordered, we iterate past upvalues, starting from the
@@ -215,7 +286,7 @@ pub const VM = struct {
 
         if (currUpvalue != null and currUpvalue.?.location == local) return currUpvalue.?;
 
-        var upvalue = try Obj.Upvalue.create(self, local);
+        var upvalue = try Upvalue.create(self, local);
         // If we got to here, it means that local is further up the stack than where upvalue
         // points to, so we want to insert the newly created upvalue before currUpvalue.
         upvalue.next = currUpvalue;
@@ -242,8 +313,19 @@ pub const VM = struct {
         }
     }
 
-    fn readString(frame: *CallFrame) *Obj.String {
-        return readConstant(frame).Obj.asType(Obj.String);
+    fn defineMethod(self: *VM, name: *String) !void {
+        // The method closure is on top of the stack currently. Below the
+        // closure will be the class it will be bound to. We take those two
+        // stack slots and store the closure in the class's method table.
+        // Finally, we pop the clousre since we no longer need it.
+        const method = self.peek(0);
+        const class = self.peek(1).Obj.asType(Class);
+        _ = try class.methods.set(name, method);
+        _ = self.stack.pop();
+    }
+
+    fn readString(frame: *CallFrame) *String {
+        return readConstant(frame).Obj.asType(String);
     }
 
     fn readConstant(frame: *CallFrame) Value {
@@ -301,7 +383,7 @@ pub const VM = struct {
         self.stack.push(Value.fromNumber(result));
     }
 
-    // nocheckin: push back onto the stack or just do the peek/pop in here?
+    // TODO: push back onto the stack or just do the peek/pop in here?
     fn concatenate(self: *VM, a: *String, b: *String) !void {
         self.stack.push(Value.fromObj(&a.obj));
         self.stack.push(Value.fromObj(&b.obj));
@@ -388,8 +470,9 @@ pub const VM = struct {
                         _ = self.stack.pop(); // Pop the instance.
                         self.stack.push(value.*);
                     } else {
-                        try self.runtimeError("Undefined property '{s}'.", .{ field_name.chars });
-                        return InterpretError.RuntimeError;
+                        if (!try self.bindMethod(instance.class, field_name)) {
+                            return InterpretError.RuntimeError;
+                        }
                     }
                 },
                 .SetProperty => {
@@ -408,7 +491,7 @@ pub const VM = struct {
                     // class Bread {}
                     // var bread = Bread();
                     // print bread.spread = "marmite";
-                    // 
+                    //
                     // In addition to setting the field, the last line will
                     // print "marmite";
                     const instance = self.peek(1).Obj.asType(Instance);
@@ -465,15 +548,22 @@ pub const VM = struct {
                     frame.ip -= offset;
                 },
                 .Call => {
-                    const argCount = readByte(frame);
-                    try self.callValue(self.peek(argCount), argCount);
+                    const arg_count = readByte(frame);
+                    try self.callValue(self.peek(arg_count), arg_count);
                     // Since calling a function will create a new CallFrame on the frames stack,
                     // so we update the frame that is being interpreted.
                     frame = &self.frames[self.frameCount - 1];
                 },
+                .Invoke => {
+                    const method = readString(frame);
+                    const arg_count = readByte(frame);
+                    try self.invoke(method, arg_count);
+
+                    frame = &self.frames[self.frameCount - 1];
+                },
                 .Closure => {
-                    const function = readConstant(frame).Obj.asType(Obj.Function);
-                    const closure = try Obj.Closure.create(self, function);
+                    const function = readConstant(frame).Obj.asType(Function);
+                    const closure = try Closure.create(self, function);
                     self.stack.push(Value.fromObj(&closure.obj));
 
                     var i: usize = 0;
@@ -511,9 +601,12 @@ pub const VM = struct {
                     frame = &self.frames[self.frameCount - 1];
                 },
                 .Class => {
-                    const class = try Obj.Class.create(self, readString(frame));
+                    const class = try Class.create(self, readString(frame));
                     self.stack.push(Value.fromObj(&class.obj));
-                }
+                },
+                .Method => {
+                    try self.defineMethod(readString(frame));
+                },
             }
         }
     }

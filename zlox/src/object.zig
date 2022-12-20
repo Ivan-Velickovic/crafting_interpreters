@@ -12,7 +12,7 @@ pub const Obj = struct {
     next: ?*Obj,
 
     const Type = enum {
-        Class, Closure, Function, Instance, Native, String, Upvalue
+        BoundMethod, Class, Closure, Function, Instance, Native, String, Upvalue
     };
 
     fn allocate(vm: *VM, comptime T: type, comptime objType: Type) !*Obj {
@@ -39,6 +39,7 @@ pub const Obj = struct {
         }
 
         switch (self.objType) {
+            .BoundMethod => self.asType(BoundMethod).destroy(vm),
             .Class => self.asType(Class).destroy(vm),
             .String => self.asType(String).destroy(vm),
             .Function => self.asType(Function).destroy(vm),
@@ -60,6 +61,7 @@ pub const Obj = struct {
     pub const Class = struct {
         obj: Obj,
         name: *String,
+        methods: Table,
 
         pub fn create(vm: *VM, name: *String) !*Class {
             const obj = try Obj.allocate(vm, Class, .Class);
@@ -67,12 +69,14 @@ pub const Obj = struct {
             class.* = Class{
                 .obj = obj.*,
                 .name = name,
+                .methods = Table.create(vm.allocator),
             };
 
             return class;
         }
 
         fn destroy(self: *Class, vm: *VM) void {
+            self.methods.destroy();
             vm.allocator.destroy(self);
         }
     };
@@ -93,6 +97,25 @@ pub const Obj = struct {
 
         fn destroy(self: *Instance, vm: *VM) void {
             self.fields.destroy();
+            vm.allocator.destroy(self);
+        }
+    };
+
+    pub const BoundMethod = struct {
+        obj: Obj,
+        receiver: Value,
+        method: *Closure,
+
+        pub fn create(vm: *VM, receiver: Value, method: *Closure) !*BoundMethod {
+            const obj = try Obj.allocate(vm, BoundMethod, .BoundMethod);
+            var bound_method = obj.asType(BoundMethod);
+            bound_method.receiver = receiver;
+            bound_method.method = method;
+
+            return bound_method;
+        }
+
+        fn destroy(self: *BoundMethod, vm: *VM) void {
             vm.allocator.destroy(self);
         }
     };
@@ -125,7 +148,7 @@ pub const Obj = struct {
     pub const Closure = struct {
         obj: Obj,
         function: *Function,
-        upvalues: std.ArrayList(*Upvalue), // nocheckin: explain why an arraylist is used.
+        upvalues: std.ArrayList(*Upvalue), // TODO: explain why an arraylist is used.
 
         pub fn create(vm: *VM, function: *Function) !*Closure {
             const obj = try Obj.allocate(vm, Closure, .Closure);
@@ -176,7 +199,7 @@ pub const Obj = struct {
         arity: u16, // While the max arity is the max int of u8, we still want to compile even if the source reaches this limit.
         upvalueCount: u9,
         chunk: Chunk,
-        name: ?*String, // nocheckin: explain why this name has to be an optional
+        name: ?*String, // TODO: explain why this name has to be an optional
 
         pub fn create(vm: *VM) !*Function {
             const obj = try Obj.allocate(vm, Function, .Function);

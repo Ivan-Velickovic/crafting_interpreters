@@ -14,10 +14,11 @@ pub const stderr = std.io.getStdErr().writer();
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const gpa_alloc = gpa.allocator();
 
-// nocheckin: CTRL+D on repl causes error.
-// nocheckin: convention is that varibales have _ instead of camel case.
-// nocheckin: figure out this init vs create shit once and for all.
-// nocheckin: figure out whether or not debug messages should go to stderr instead of stdout? eg it makes sense to use std.log
+// TODO: fix loop_too_large.lox test
+// TODO: CTRL+D on repl causes error.
+// TODO: convention is that varibales have _ instead of camel case.
+// TODO: figure out this init vs create shit once and for all.
+// TODO: figure out whether or not debug messages should go to stderr instead of stdout? eg it makes sense to use std.log
 // to log stuff for GC.
 pub fn main() !void {
     if (debug_options.printCode)        std.log.info("[debug option set] Print code", .{});
@@ -27,14 +28,14 @@ pub fn main() !void {
     if (debug_options.stressGC)         std.log.info("[debug option set] Invoke GC as much as possible", .{});
     if (debug_options.all)              std.log.info("Running with all debug options set.\n", .{});
 
-    // nocheckin: come back to this, recheck all the allocators and how they're used in this file
+    // TODO: come back to this, recheck all the allocators and how they're used in this file
     // We don't do anything with whether or not there were leaks since
     // something would have been printed by the deinit funciton anyways.
-    // defer _ = gpa.detectLeaks();
     defer _ = gpa.deinit();
+    defer _ = gpa.detectLeaks();
 
-    // nocheckin: explain vm create vs init
-    var vm = VM.create();
+    // TODO: explain vm create vs init
+    var vm = try VM.create();
     defer vm.destroy();
 
     // if (debug_options.detectMemLeaks) _ = gpa.detectLeaks();
@@ -52,7 +53,7 @@ pub fn main() !void {
         2 => try runFile(&vm, args[1]),
         else => {
             std.debug.print("Usage: lox [path]\n", .{});
-            process.exit(64); // command-line usage error code nocheckin: comment all the other codes cos idk what the fuck they mean.
+            process.exit(64); // command-line usage error code TODO: comment all the other codes cos idk what the fuck they mean.
         },
     }
 }

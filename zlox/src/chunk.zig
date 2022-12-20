@@ -31,11 +31,13 @@ pub const OpCode = enum(u8) {
     Jump,
     JumpIfFalse,
     Call,
+    Invoke,
     Closure,
     Loop,
     CloseUpvalue,
     Return,
     Class,
+    Method,
 };
 
 pub const Chunk = struct {

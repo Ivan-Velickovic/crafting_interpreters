@@ -30,7 +30,7 @@ pub fn compile(source: []const u8, vm: *VM) !*Obj.Function {
 
     const function = try parser.end();
 
-    return if (!parser.hadError) function else InterpretError.CompileError;
+    return if (!parser.had_error) function else InterpretError.CompileError;
 }
 
 const Precedence = enum {
@@ -67,16 +67,16 @@ fn getPrecedence(tokenType: TokenType) Precedence {
 
 const Local = struct {
     name: []const u8,
-    isCaptured: bool,
+    is_captured: bool,
     depth: isize,
 };
 
 const Upvalue = packed struct {
     index: u8,
-    isLocal: bool,
+    is_local: bool,
 };
 
-const FunctionType = enum { Function, Script };
+const FunctionType = enum { Function, Initialiser, Method, Script };
 
 pub const Compiler = struct {
     pub const MAX_LOCALS = std.math.maxInt(u8) + 1;
@@ -84,32 +84,40 @@ pub const Compiler = struct {
 
     enclosing: ?*Compiler,
     function: *Obj.Function,
-    functionType: FunctionType,
+    function_type: FunctionType,
     locals: [MAX_LOCALS]Local,
-    localCount: u9,
+    local_count: u9,
     upvalues: [MAX_UPVALUES]Upvalue,
-    scopeDepth: u9,
+    scope_depth: u9,
 
-    fn create(vm: *VM, enclosing: ?*Compiler, functionType: FunctionType) !Compiler {
+    fn create(vm: *VM, enclosing: ?*Compiler, function_type: FunctionType) !Compiler {
         var compiler = Compiler{
             .enclosing = enclosing,
             .function = try Obj.Function.create(vm),
-            .functionType = functionType,
+            .function_type = function_type,
             .locals = undefined,
             .upvalues = undefined,
-            .localCount = 0,
-            .scopeDepth = 0,
+            .local_count = 0,
+            .scope_depth = 0,
         };
 
-        compiler.locals[compiler.localCount] = Local{
-            .name = "",
-            .isCaptured = false,
+        // Here we define the first slot.
+        // In the case of method calls, we use this slot for the "this" keyword/variable.
+        // In this case of function calls, we use this slot for the function being called.
+        const name = if (function_type != .Function) "this" else "";
+        compiler.locals[0] = Local{
+            .name = name,
+            .is_captured = false,
             .depth = 0,
         };
-        compiler.localCount += 1;
+        compiler.local_count = 1;
 
         return compiler;
     }
+};
+
+const ClassCompiler = struct {
+    enclosing: ?*ClassCompiler,
 };
 
 pub const Parser = struct {
@@ -117,8 +125,9 @@ pub const Parser = struct {
     compiler: *Compiler,
     scanner: Scanner,
     current: Token,
+    current_class: ?*ClassCompiler,
     previous: Token,
-    hadError: bool,
+    had_error: bool,
     panicMode: bool,
 
     fn create(source: []const u8, vm: *VM, compiler: *Compiler) !Parser {
@@ -127,17 +136,18 @@ pub const Parser = struct {
             .compiler = compiler,
             .scanner = Scanner.create(source),
             .current = undefined,
+            .current_class = null,
             .previous = undefined,
-            .hadError = false,
+            .had_error = false,
             .panicMode = false,
         };
     }
 
     fn end(self: *Parser) !*Obj.Function {
-        try self.emitNilReturn();
+        try self.emitReturn();
         const function = self.compiler.function;
 
-        if (debug_options.printCode and !self.hadError) {
+        if (debug_options.printCode and !self.had_error) {
             const chunkName = if (function.name) |name| name.chars else "<script>";
             try debug.disassembleChunk(self.currentChunk(), chunkName);
         }
@@ -158,19 +168,19 @@ pub const Parser = struct {
     }
 
     fn beginScope(self: *Parser) void {
-        self.compiler.scopeDepth += 1;
+        self.compiler.scope_depth += 1;
     }
 
     fn endScope(self: *Parser) !void {
-        self.compiler.scopeDepth -= 1;
+        self.compiler.scope_depth -= 1;
 
-        while (self.compiler.localCount > 0 and self.compiler.locals[self.compiler.localCount - 1].depth > self.compiler.scopeDepth) {
-            if (self.compiler.locals[self.compiler.localCount - 1].isCaptured) {
+        while (self.compiler.local_count > 0 and self.compiler.locals[self.compiler.local_count - 1].depth > self.compiler.scope_depth) {
+            if (self.compiler.locals[self.compiler.local_count - 1].is_captured) {
                 try self.emitOp(.CloseUpvalue);
             } else {
                 try self.emitOp(.Pop);
             }
-            self.compiler.localCount -= 1;
+            self.compiler.local_count -= 1;
         }
     }
 
@@ -189,7 +199,7 @@ pub const Parser = struct {
         }
 
         try stderr.print(": " ++ fmt ++ "\n", args);
-        self.hadError = true;
+        self.had_error = true;
     }
 
     fn errorAtPrevious(self: *Parser, comptime fmt: []const u8, args: anytype) !void {
@@ -217,7 +227,7 @@ pub const Parser = struct {
             return;
         }
 
-        try self.errorAtCurrent("{s}", .{msg});
+        try self.errorAtCurrent("{s}", .{ msg });
     }
 
     fn check(self: *Parser, tokenType: TokenType) bool {
@@ -273,8 +283,12 @@ pub const Parser = struct {
         try self.emitByte(@intCast(u8, offset & 0xff));
     }
 
-    fn emitNilReturn(self: *Parser) !void {
-        try self.emitOp(.Nil);
+    fn emitReturn(self: *Parser) !void {
+        if (self.compiler.function_type == .Initialiser) {
+            try self.emitUnaryOp(.GetLocal, 0);
+        } else {
+            try self.emitOp(.Nil);
+        }
         try self.emitOp(.Return);
     }
 
@@ -314,7 +328,7 @@ pub const Parser = struct {
     }
 
     fn resolveLocal(self: *Parser, compiler: *Compiler, name: []const u8) !isize {
-        var i: isize = compiler.localCount - 1;
+        var i: isize = compiler.local_count - 1;
         while (i >= 0) : (i -= 1) {
             const local = compiler.locals[@intCast(usize, i)];
             if (std.mem.eql(u8, name, local.name)) {
@@ -330,24 +344,24 @@ pub const Parser = struct {
     }
 
     fn addLocal(self: *Parser, compiler: *Compiler, name: []const u8) !void {
-        if (compiler.localCount == Compiler.MAX_LOCALS) {
+        if (compiler.local_count == Compiler.MAX_LOCALS) {
             try self.errorAtPrevious("Too many local variables in function.", .{});
             return;
         }
 
-        compiler.locals[compiler.localCount] = Local{
+        compiler.locals[compiler.local_count] = Local{
             .name = name,
-            .isCaptured = false,
+            .is_captured = false,
             .depth = -1,
         };
-        compiler.localCount += 1;
+        compiler.local_count += 1;
     }
 
     fn resolveUpvalue(self: *Parser, compiler: *Compiler, name: []const u8) CompilerError!isize {
         if (compiler.enclosing) |enclosing| {
             const local = try self.resolveLocal(enclosing, name);
             if (local != -1) {
-                enclosing.locals[@intCast(usize, local)].isCaptured = true;
+                enclosing.locals[@intCast(usize, local)].is_captured = true;
                 return @intCast(isize, try self.addUpvalue(compiler, @intCast(u8, local), true));
             }
 
@@ -360,11 +374,11 @@ pub const Parser = struct {
         return -1;
     }
 
-    fn addUpvalue(self: *Parser, compiler: *Compiler, index: u8, isLocal: bool) !usize {
+    fn addUpvalue(self: *Parser, compiler: *Compiler, index: u8, is_local: bool) !usize {
         var i: usize = 0;
         while (i < compiler.function.upvalueCount) : (i += 1) {
             const upvalue = compiler.upvalues[i];
-            if (upvalue.index == index and upvalue.isLocal == isLocal) {
+            if (upvalue.index == index and upvalue.is_local == is_local) {
                 return i;
             }
         }
@@ -375,7 +389,7 @@ pub const Parser = struct {
         }
 
         compiler.upvalues[compiler.function.upvalueCount] = Upvalue{
-            .isLocal = isLocal,
+            .is_local = is_local,
             .index = index,
         };
         compiler.function.upvalueCount += 1;
@@ -384,14 +398,14 @@ pub const Parser = struct {
     }
 
     fn declareVariable(self: *Parser) !void {
-        if (self.compiler.scopeDepth == 0) return;
+        if (self.compiler.scope_depth == 0) return;
 
         // Look for any variables in the same scope that have the same name.
         // We start from end of the array since that is where the current scope is.
-        var i: isize = self.compiler.localCount - 1;
+        var i: isize = self.compiler.local_count - 1;
         while (i >= 0) : (i -= 1) {
             const local = self.compiler.locals[@intCast(usize, i)];
-            if (local.depth != -1 and local.depth < self.compiler.scopeDepth) break;
+            if (local.depth != -1 and local.depth < self.compiler.scope_depth) break;
 
             if (std.mem.eql(u8, self.previous.lexeme, local.name)) {
                 try self.errorAtPrevious("Already a variable with this name in this scope.", .{});
@@ -422,8 +436,8 @@ pub const Parser = struct {
     }
 
     fn call(self: *Parser) !void {
-        const argCount = try self.argumentList();
-        try self.emitUnaryOp(.Call, argCount);
+        const arg_count = try self.argumentList();
+        try self.emitUnaryOp(.Call, arg_count);
     }
 
     fn dot(self: *Parser, can_assign: bool) !void {
@@ -433,6 +447,10 @@ pub const Parser = struct {
         if (can_assign and try self.match(.Equal)) {
             try self.expression();
             try self.emitUnaryOp(.SetProperty, name);
+        } else if (try self.match(.LeftParen)) {
+            const arg_count = try self.argumentList();
+            try self.emitUnaryOp(.Invoke, name);
+            try self.emitByte(arg_count);
         } else {
             try self.emitUnaryOp(.GetProperty, name);
         }
@@ -512,6 +530,14 @@ pub const Parser = struct {
         try self.namedVariable(self.previous.lexeme, can_assign);
     }
 
+    fn this(self: *Parser) !void {
+        if (self.current_class) |_| {
+            try self.variable(false);
+        } else {
+            try self.errorAtPrevious("Can't use 'this' outside of a class.", .{});
+        }
+    }
+
     fn unary(self: *Parser) !void {
         const operatorType = self.previous.tokenType;
 
@@ -534,6 +560,7 @@ pub const Parser = struct {
             .String => try self.string(),
             .Number => try self.number(),
             .False, .True, .Nil => try self.literal(),
+            .This => try self.this(),
             else => try self.prefixError(),
         }
     }
@@ -577,19 +604,19 @@ pub const Parser = struct {
         try self.consume(.Identifier, errMsg);
 
         try self.declareVariable();
-        if (self.compiler.scopeDepth > 0) return 0;
+        if (self.compiler.scope_depth > 0) return 0;
 
         return try self.identifierConstant(self.previous.lexeme);
     }
 
     fn markInitialized(self: *Parser) void {
-        if (self.compiler.scopeDepth == 0) return;
+        if (self.compiler.scope_depth == 0) return;
 
-        self.compiler.locals[self.compiler.localCount - 1].depth = self.compiler.scopeDepth;
+        self.compiler.locals[self.compiler.local_count - 1].depth = self.compiler.scope_depth;
     }
 
     fn defineVariable(self: *Parser, global: u8) !void {
-        if (self.compiler.scopeDepth > 0) {
+        if (self.compiler.scope_depth > 0) {
             self.markInitialized();
             return;
         }
@@ -598,15 +625,15 @@ pub const Parser = struct {
     }
 
     fn argumentList(self: *Parser) !u8 {
-        var argCount: u8 = 0;
+        var arg_count: u8 = 0;
         if (!self.check(.RightParen)) {
             while (true) {
                 try self.expression();
 
-                if (argCount == Obj.Function.MAX_ARITY) {
+                if (arg_count == Obj.Function.MAX_ARITY) {
                     try self.errorAtPrevious("Can't have more than {d} arguments.", .{Obj.Function.MAX_ARITY});
                 } else {
-                    argCount += 1;
+                    arg_count += 1;
                 }
 
                 if (!try self.match(.Comma)) break;
@@ -615,7 +642,7 @@ pub const Parser = struct {
 
         try self.consume(.RightParen, "Expect ')' after arguments.");
 
-        return argCount;
+        return arg_count;
     }
 
     fn and_(self: *Parser) !void {
@@ -639,8 +666,8 @@ pub const Parser = struct {
         try self.consume(.RightBrace, "Expect '}' after block.");
     }
 
-    fn function_(self: *Parser, functionType: FunctionType) !void {
-        var compiler = try Compiler.create(self.vm, self.compiler, functionType);
+    fn function_(self: *Parser, function_type: FunctionType) !void {
+        var compiler = try Compiler.create(self.vm, self.compiler, function_type);
         self.compiler = &compiler;
         self.compiler.function.name = try Obj.String.copy(self.vm, self.previous.lexeme);
         self.beginScope();
@@ -667,21 +694,51 @@ pub const Parser = struct {
 
         var i: usize = 0;
         while (i < function.upvalueCount) : (i += 1) {
-            try self.emitByte(@boolToInt(compiler.upvalues[i].isLocal));
+            try self.emitByte(@boolToInt(compiler.upvalues[i].is_local));
             try self.emitByte(compiler.upvalues[i].index);
         }
     }
 
+    fn method(self: *Parser) !void {
+        try self.consume(.Identifier, "Expect method name.");
+        const constant = try self.identifierConstant(self.previous.lexeme);
+
+        var function_type: FunctionType = undefined;
+        if (std.mem.eql(u8, self.previous.lexeme, "init")) {
+            function_type = .Initialiser;
+        } else {
+            function_type = .Method;
+        }
+        // TODO: for some reason the below causes a compiler error, not sure why.
+        // const function_type = if (std.mem.eql(u8, self.previous.lexeme, "init")) .Initialiser else .Method;
+        try self.function_(function_type);
+
+        try self.emitUnaryOp(.Method, constant);
+    }
+
     fn classDeclaration(self: *Parser) !void {
         try self.consume(.Identifier, "Expect class name.");
+        const class_name = self.previous.lexeme;
         const name_constant = try self.identifierConstant(self.previous.lexeme);
         try self.declareVariable();
 
         try self.emitBytes(@enumToInt(OpCode.Class), name_constant);
         try self.defineVariable(name_constant);
 
+        var class_compiler: ClassCompiler = .{ .enclosing = self.current_class };
+        self.current_class = &class_compiler;
+
+        try self.namedVariable(class_name, false);
         try self.consume(.LeftBrace, "Expect '{' before class body.");
+        while (!self.check(.RightBrace) and !self.check(.EOF)) {
+            try self.method();
+        }
         try self.consume(.RightBrace, "Expect '}' after class body.");
+        // Once we've reached the end of the methods, we no longer need the
+        // class and so we can pop it off the stack.
+        try self.emitOp(.Pop);
+
+        self.current_class = self.current_class.?.enclosing;
     }
 
     fn fnDeclaration(self: *Parser) !void {
@@ -782,13 +839,20 @@ pub const Parser = struct {
     }
 
     fn returnStatement(self: *Parser) !void {
-        if (self.compiler.functionType == .Script) {
+        if (self.compiler.function_type == .Script) {
             try self.errorAtPrevious("Can't return from top-level code.", .{});
         }
 
         if (try self.match(.Semicolon)) {
-            try self.emitNilReturn();
+            try self.emitReturn();
         } else {
+            // Note that even if an error is reported we still want to
+            // continue with compilation to avoid a more errors since there
+            // will be a trailing expression after the return statement.
+            if (self.compiler.function_type == .Initialiser) {
+                try self.errorAtPrevious("Can't return a value from an initializer.", .{});
+            }
+
             try self.expression();
             try self.consume(.Semicolon, "Expect ';' after value.");
             try self.emitOp(.Return);
