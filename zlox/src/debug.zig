@@ -22,9 +22,9 @@ fn constantInstruction(name: []const u8, chunk: *Chunk, offset: usize) !usize {
 }
 
 fn invokeInstruction(name: []const u8, chunk: *Chunk, offset: usize) !usize {
-    const constant = chunk.code[offset + 1];
-    const arg_count = chunk.code[offset + 2];
-    try stdout.print("{s:-<16} ({d} args) '{s: >4} '{}'", .{ name, arg_count, constant, chunk.constants.values[constant] });
+    const constant = chunk.code.items[offset + 1];
+    const arg_count = chunk.code.items[offset + 2];
+    try stdout.print("{s:-<16} ({d} args) '{d: >4} '{s}'", .{ name, arg_count, constant, chunk.constants.items[constant] });
 
     return offset + 3;
 }
@@ -59,7 +59,7 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize) !usize {
     if (offset > 0 and chunk.lines.items[offset] == chunk.lines.items[offset - 1]) {
         try stdout.print("   | ", .{});
     } else {
-        try stdout.print("{d: >4} ", .{chunk.lines.items[offset]});
+        try stdout.print("{d: >4} ", .{ chunk.lines.items[offset] });
     }
 
     const instruction = chunk.code.items[offset];

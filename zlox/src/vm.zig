@@ -10,6 +10,9 @@ const Value = @import("value.zig").Value;
 const Chunk = @import("chunk.zig").Chunk;
 const OpCode = @import("chunk.zig").OpCode;
 const Obj = @import("object.zig").Obj;
+const FixedCapacityStack = @import("stack.zig").FixedCapacityStack;
+const Allocator = std.mem.Allocator;
+
 const BoundMethod = Obj.BoundMethod;
 const Class = Obj.Class;
 const Closure = Obj.Closure;
@@ -18,8 +21,7 @@ const Instance = Obj.Instance;
 const Native = Obj.Native;
 const String = Obj.String;
 const Upvalue = Obj.Upvalue;
-const FixedCapacityStack = @import("stack.zig").FixedCapacityStack;
-const Allocator = std.mem.Allocator;
+
 const stdout = main.stdout;
 const stderr = main.stderr;
 
@@ -41,31 +43,31 @@ pub const VM = struct {
 
     allocator: Allocator,
     frames: [FRAMES_MAX]CallFrame,
-    frameCount: u7,
+    frame_count: u7,
     stack: FixedCapacityStack(Value),
     globals: Table,
     strings: Table,
     init_string: ?*String,
-    openUpvalues: ?*Upvalue,
-    bytesAllocated: usize,
-    nextGC: usize,
+    open_upvalues: ?*Upvalue,
+    bytes_allocated: usize,
+    next_gc: usize,
     objects: ?*Obj,
-    grayStack: std.ArrayList(*Obj),
+    gray_stack: std.ArrayList(*Obj),
 
     pub fn create() !VM {
         var vm = VM{
             .allocator = undefined,
             .frames = undefined,
-            .frameCount = 0,
+            .frame_count = 0,
             .stack = undefined,
             .globals = undefined,
             .strings = undefined,
             .init_string = null,
-            .openUpvalues = null,
-            .bytesAllocated = 0,
-            .nextGC = 1024 * 1024,
+            .open_upvalues = null,
+            .bytes_allocated = 0,
+            .next_gc = 1024 * 1024,
             .objects = null,
-            .grayStack = undefined,
+            .gray_stack = undefined,
         };
 
         return vm;
@@ -82,7 +84,7 @@ pub const VM = struct {
         // is so that the memory for the gray stack is not managed by the GC to prevent
         // growing the gray stack causing recursive invocations of the GC if we were in
         // the middle of a garbage collection.
-        self.grayStack = std.ArrayList(*Obj).init(gc.internalAllocator);
+        self.gray_stack = std.ArrayList(*Obj).init(gc.internalAllocator);
 
         self.init_string = try String.copy(self, "init");
 
@@ -95,7 +97,7 @@ pub const VM = struct {
         self.strings.destroy();
         self.init_string = null;
         self.freeObjects();
-        self.grayStack.deinit();
+        self.gray_stack.deinit();
     }
 
     fn freeObjects(self: *VM) void {
@@ -124,8 +126,8 @@ pub const VM = struct {
         try stderr.print(fmt ++ "\n", args);
 
         var i: usize = 0;
-        while (i < self.frameCount) : (i += 1) {
-            const frame = &self.frames[self.frameCount - 1 - i];
+        while (i < self.frame_count) : (i += 1) {
+            const frame = &self.frames[self.frame_count - 1 - i];
 
             // frame.ip - 1 because we want to refer to the previous instruction as
             // that is where the error occurred.
@@ -143,10 +145,10 @@ pub const VM = struct {
     }
 
     fn defineNative(self: *VM, name: []const u8, function: Native.Fn) !void {
-        const nameObj = &(try String.copy(self, name)).obj;
-        self.stack.push(Value.fromObj(nameObj));
-        const functionObj = &(try Native.create(self, function)).obj;
-        self.stack.push(Value.fromObj(functionObj));
+        const name_obj = &(try String.copy(self, name)).obj;
+        self.stack.push(Value.fromObj(name_obj));
+        const function_obj = &(try Native.create(self, function)).obj;
+        self.stack.push(Value.fromObj(function_obj));
 
         _ = try self.globals.set(self.stack.items[0].Obj.asType(String), self.stack.items[1]);
         _ = self.stack.pop();
@@ -155,8 +157,8 @@ pub const VM = struct {
 
     fn resetStack(self: *VM) void {
         self.stack.resize(0);
-        self.frameCount = 0;
-        self.openUpvalues = null;
+        self.frame_count = 0;
+        self.open_upvalues = null;
     }
 
     fn peek(self: *VM, distance: usize) Value {
@@ -169,12 +171,12 @@ pub const VM = struct {
             return InterpretError.RuntimeError;
         }
 
-        if (self.frameCount == FRAMES_MAX) {
+        if (self.frame_count == FRAMES_MAX) {
             try self.runtimeError("Stack overflow.", .{});
             return InterpretError.RuntimeError;
         }
 
-        self.frames[self.frameCount] = CallFrame{
+        self.frames[self.frame_count] = CallFrame{
             .closure = closure,
             .ip = 0,
             // We want the slots to start from the beggining of the bytecode
@@ -182,12 +184,12 @@ pub const VM = struct {
             // that also includes the name of the function.
             .start = self.stack.items.len - arg_count - 1,
         };
-        self.frameCount += 1;
+        self.frame_count += 1;
     }
 
     fn callValue(self: *VM, callee: Value, arg_count: u8) !void {
         if (callee == .Obj) {
-            switch (callee.Obj.objType) {
+            switch (callee.Obj.obj_type) {
                 .BoundMethod => {
                     const bound_method = callee.Obj.asType(BoundMethod);
                     self.stack.items[self.stack.items.len - arg_count - 1] = bound_method.receiver;
@@ -273,35 +275,35 @@ pub const VM = struct {
     }
 
     fn captureUpvalue(self: *VM, local: *Value) !*Upvalue {
-        var prevUpvalue: ?*Upvalue = null;
-        var currUpvalue = self.openUpvalues;
-        while (currUpvalue) |upvalue| {
+        var prev_upvalue: ?*Upvalue = null;
+        var curr_upvalue = self.open_upvalues;
+        while (curr_upvalue) |upvalue| {
             // Since open upvalues are ordered, we iterate past upvalues, starting from the
             // top of the stack, that point to Values above the one we are looking for.
             if (@ptrToInt(upvalue.location) <= @ptrToInt(local)) break;
 
-            prevUpvalue = upvalue;
-            currUpvalue = upvalue.next;
+            prev_upvalue = upvalue;
+            curr_upvalue = upvalue.next;
         }
 
-        if (currUpvalue != null and currUpvalue.?.location == local) return currUpvalue.?;
+        if (curr_upvalue != null and curr_upvalue.?.location == local) return curr_upvalue.?;
 
         var upvalue = try Upvalue.create(self, local);
         // If we got to here, it means that local is further up the stack than where upvalue
-        // points to, so we want to insert the newly created upvalue before currUpvalue.
-        upvalue.next = currUpvalue;
+        // points to, so we want to insert the newly created upvalue before curr_upvalue.
+        upvalue.next = curr_upvalue;
 
-        if (prevUpvalue) |prev| {
+        if (prev_upvalue) |prev| {
             prev.next = upvalue;
         } else {
-            self.openUpvalues = upvalue;
+            self.open_upvalues = upvalue;
         }
 
         return upvalue;
     }
 
     fn closeUpvalues(self: *VM, last: *Value) void {
-        while (self.openUpvalues) |upvalue| {
+        while (self.open_upvalues) |upvalue| {
             // We want to close every open upvalue that is above the given slot in the stack.
             if (@ptrToInt(upvalue.location) < @ptrToInt(last)) break;
             // We move the Value at location from the stack to the heap allocated Upvalue,
@@ -309,7 +311,7 @@ pub const VM = struct {
             // to the location of an upvalue are still correct.
             upvalue.closed = upvalue.location.*;
             upvalue.location = &upvalue.closed;
-            self.openUpvalues = upvalue.next;
+            self.open_upvalues = upvalue.next;
         }
     }
 
@@ -389,20 +391,20 @@ pub const VM = struct {
         self.stack.push(Value.fromObj(&b.obj));
 
         const slices = [_][]const u8 {a.chars, b.chars};
-        const concatenatedChars = try std.mem.concat(self.allocator, u8, &slices);
+        const concatenated_chars = try std.mem.concat(self.allocator, u8, &slices);
 
         _ = self.stack.pop();
         _ = self.stack.pop();
 
-        const result = try String.take(self, concatenatedChars);
+        const result = try String.take(self, concatenated_chars);
         self.stack.push(Value.fromObj(&result.obj));
     }
 
     pub fn run(self: *VM) !void {
-        var frame = &self.frames[self.frameCount - 1];
+        var frame = &self.frames[self.frame_count - 1];
 
         while (true) {
-            if (debug_options.traceExecution) {
+            if (debug_options.trace_execution) {
                 try stdout.print("          ", .{});
                 for (self.stack.items) |value| {
                     try stdout.print("[ {} ]", .{value});
@@ -552,14 +554,14 @@ pub const VM = struct {
                     try self.callValue(self.peek(arg_count), arg_count);
                     // Since calling a function will create a new CallFrame on the frames stack,
                     // so we update the frame that is being interpreted.
-                    frame = &self.frames[self.frameCount - 1];
+                    frame = &self.frames[self.frame_count - 1];
                 },
                 .Invoke => {
                     const method = readString(frame);
                     const arg_count = readByte(frame);
                     try self.invoke(method, arg_count);
 
-                    frame = &self.frames[self.frameCount - 1];
+                    frame = &self.frames[self.frame_count - 1];
                 },
                 .Closure => {
                     const function = readConstant(frame).Obj.asType(Function);
@@ -585,8 +587,8 @@ pub const VM = struct {
                 .Return => {
                     const result = self.stack.pop();
                     self.closeUpvalues(&self.stack.items[frame.start]);
-                    self.frameCount -= 1;
-                    if (self.frameCount == 0) {
+                    self.frame_count -= 1;
+                    if (self.frame_count == 0) {
                         // pop the top-level "main" function if this was the last CallFrame.
                         _ = self.stack.pop();
                         return;
@@ -598,7 +600,7 @@ pub const VM = struct {
                     self.stack.resize(frame.start);
 
                     self.stack.push(result);
-                    frame = &self.frames[self.frameCount - 1];
+                    frame = &self.frames[self.frame_count - 1];
                 },
                 .Class => {
                     const class = try Class.create(self, readString(frame));

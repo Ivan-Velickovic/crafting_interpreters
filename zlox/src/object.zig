@@ -7,38 +7,38 @@ const Chunk = @import("chunk.zig").Chunk;
 const Table = @import("table.zig").Table;
 
 pub const Obj = struct {
-    objType: Type,
-    isMarked: bool,
+    obj_type: Type,
+    is_marked: bool,
     next: ?*Obj,
 
     const Type = enum {
         BoundMethod, Class, Closure, Function, Instance, Native, String, Upvalue
     };
 
-    fn allocate(vm: *VM, comptime T: type, comptime objType: Type) !*Obj {
+    fn allocate(vm: *VM, comptime T: type, comptime obj_type: Type) !*Obj {
         const ptr = try vm.allocator.create(T);
 
         ptr.obj = Obj{
-            .objType = objType,
-            .isMarked = false,
+            .obj_type = obj_type,
+            .is_marked = false,
             .next = vm.objects,
         };
 
         vm.objects = &ptr.obj;
 
-        if (debug_options.logGC) {
-            std.debug.print("{*} allocate {d} for {s}\n", .{ &ptr.obj, @sizeOf(T), objType });
+        if (debug_options.log_gc) {
+            std.debug.print("{*} allocate {d} for {s}\n", .{ &ptr.obj, @sizeOf(T), obj_type });
         }
 
         return &ptr.obj;
     }
 
     pub fn destroy(self: *Obj, vm: *VM) void {
-        if (debug_options.logGC) {
-            std.debug.print("{*} free type {s}\n", .{ self, self.objType });
+        if (debug_options.log_gc) {
+            std.debug.print("{*} free type {s}\n", .{ self, self.obj_type });
         }
 
-        switch (self.objType) {
+        switch (self.obj_type) {
             .BoundMethod => self.asType(BoundMethod).destroy(vm),
             .Class => self.asType(Class).destroy(vm),
             .String => self.asType(String).destroy(vm),
@@ -54,8 +54,8 @@ pub const Obj = struct {
         return @fieldParentPtr(T, "obj", self);
     }
 
-    pub fn isType(value: Value, objType: Type) bool {
-        return value == .Obj and value.Obj.objType == objType;
+    pub fn isType(value: Value, obj_type: Type) bool {
+        return value == .Obj and value.Obj.obj_type == obj_type;
     }
 
     pub const Class = struct {

@@ -63,7 +63,7 @@ pub const Value = union(ValueType) {
             .Number => try writer.print("{d}", .{ self.Number }),
             .Obj => {
                 const obj = self.Obj;
-                switch (obj.objType) {
+                switch (obj.obj_type) {
                     .BoundMethod => {
                         const name = if (obj.asType(BoundMethod).method.function.name) |name| name.chars else "<script>";
                         try writer.print("<fn {s}>", .{ name });

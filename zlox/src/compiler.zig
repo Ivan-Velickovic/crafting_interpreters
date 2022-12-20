@@ -13,6 +13,9 @@ const Token = @import("scanner.zig").Token;
 const TokenType = @import("scanner.zig").TokenType;
 const OpCode = @import("chunk.zig").OpCode;
 
+const Function = Obj.Function;
+const String = Obj.String;
+
 // Note that this is only because the Zig compiler (at least in v0.8.0)
 // cannot infer recursive error union types, which becomes apparent
 // for functions like parsePrecedence.
@@ -128,7 +131,7 @@ pub const Parser = struct {
     current_class: ?*ClassCompiler,
     previous: Token,
     had_error: bool,
-    panicMode: bool,
+    panic_mode: bool,
 
     fn create(source: []const u8, vm: *VM, compiler: *Compiler) !Parser {
         return Parser{
@@ -139,7 +142,7 @@ pub const Parser = struct {
             .current_class = null,
             .previous = undefined,
             .had_error = false,
-            .panicMode = false,
+            .panic_mode = false,
         };
     }
 
@@ -147,9 +150,9 @@ pub const Parser = struct {
         try self.emitReturn();
         const function = self.compiler.function;
 
-        if (debug_options.printCode and !self.had_error) {
-            const chunkName = if (function.name) |name| name.chars else "<script>";
-            try debug.disassembleChunk(self.currentChunk(), chunkName);
+        if (debug_options.print_code and !self.had_error) {
+            const chunk_name = if (function.name) |name| name.chars else "<script>";
+            try debug.disassembleChunk(self.currentChunk(), chunk_name);
         }
 
         // To avoid having an optional compiler pointer in the parser, we instead only assign
@@ -185,17 +188,17 @@ pub const Parser = struct {
     }
 
     fn errorAt(self: *Parser, token: *Token, comptime fmt: []const u8, args: anytype) !void {
-        if (self.panicMode) return;
+        if (self.panic_mode) return;
 
-        self.panicMode = true;
-        try stderr.print("[line {}] Error", .{token.line});
+        self.panic_mode = true;
+        try stderr.print("[line {}] Error", .{ token.line });
 
         if (token.tokenType == .EOF) {
             try stderr.print(" at end", .{});
         } else if (token.tokenType == .Error) {
             // Nothing for now.
         } else {
-            try stderr.print(" at '{s}'", .{token.lexeme});
+            try stderr.print(" at '{s}'", .{ token.lexeme });
         }
 
         try stderr.print(": " ++ fmt ++ "\n", args);
@@ -217,7 +220,7 @@ pub const Parser = struct {
             self.current = self.scanner.scanToken();
             if (self.current.tokenType != .Error) break;
 
-            try self.errorAtCurrent("{s}", .{self.current.lexeme});
+            try self.errorAtCurrent("{s}", .{ self.current.lexeme });
         }
     }
 
@@ -319,8 +322,8 @@ pub const Parser = struct {
     }
 
     fn stringValue(self: *Parser, chars: []const u8) !Value {
-        const objString = try Obj.String.copy(self.vm, chars);
-        return Value.fromObj(&objString.obj);
+        const string_obj = try String.copy(self.vm, chars);
+        return Value.fromObj(&string_obj.obj);
     }
 
     fn identifierConstant(self: *Parser, name: []const u8) !u8 {
@@ -416,11 +419,11 @@ pub const Parser = struct {
     }
 
     fn binary(self: *Parser) !void {
-        const operatorType = self.previous.tokenType;
-        const precedence = getPrecedence(operatorType);
+        const operator_type = self.previous.tokenType;
+        const precedence = getPrecedence(operator_type);
         try self.parsePrecedence(precedence.next());
 
-        switch (operatorType) {
+        switch (operator_type) {
             .BangEqual => try self.emitOps(.Equal, .Not),
             .EqualEqual => try self.emitOp(.Equal),
             .Greater => try self.emitOp(.Greater),
@@ -479,50 +482,50 @@ pub const Parser = struct {
     }
 
     fn or_(self: *Parser) !void {
-        const elseJump = try self.emitJump(.JumpIfFalse);
-        const endJump = try self.emitJump(.Jump);
+        const else_jump = try self.emitJump(.JumpIfFalse);
+        const end_jump = try self.emitJump(.Jump);
 
-        try self.patchJump(elseJump);
+        try self.patchJump(else_jump);
         try self.emitOp(.Pop);
 
         try self.parsePrecedence(.Or);
-        try self.patchJump(endJump);
+        try self.patchJump(end_jump);
     }
 
     fn string(self: *Parser) !void {
         // Trim leading and trailing quotation marks.
-        const stringToCopy = self.previous.lexeme[1 .. self.previous.lexeme.len - 1];
-        try self.emitConstant(try self.stringValue(stringToCopy));
+        const string_to_copy = self.previous.lexeme[1 .. self.previous.lexeme.len - 1];
+        try self.emitConstant(try self.stringValue(string_to_copy));
     }
 
     fn namedVariable(self: *Parser, name: []const u8, can_assign: bool) !void {
-        var getOp: OpCode = undefined;
-        var setOp: OpCode = undefined;
+        var get_op: OpCode = undefined;
+        var set_op: OpCode = undefined;
         var arg: u8 = undefined;
 
         const resolveLocalArg = try self.resolveLocal(self.compiler, name);
         if (resolveLocalArg != -1) {
             arg = @intCast(u8, resolveLocalArg);
-            getOp = .GetLocal;
-            setOp = .SetLocal;
+            get_op = .GetLocal;
+            set_op = .SetLocal;
         } else {
             const resolveUpvalueArg = try self.resolveUpvalue(self.compiler, name);
             if (resolveUpvalueArg != -1) {
                 arg = @intCast(u8, resolveUpvalueArg);
-                getOp = .GetUpvalue;
-                setOp = .SetUpvalue;
+                get_op = .GetUpvalue;
+                set_op = .SetUpvalue;
             } else {
                 arg = try self.identifierConstant(name);
-                getOp = .GetGlobal;
-                setOp = .SetGlobal;
+                get_op = .GetGlobal;
+                set_op = .SetGlobal;
             }
         }
 
         if (can_assign and try self.match(.Equal)) {
             try self.expression();
-            try self.emitUnaryOp(setOp, arg);
+            try self.emitUnaryOp(set_op, arg);
         } else {
-            try self.emitUnaryOp(getOp, arg);
+            try self.emitUnaryOp(get_op, arg);
         }
     }
 
@@ -539,13 +542,11 @@ pub const Parser = struct {
     }
 
     fn unary(self: *Parser) !void {
-        const operatorType = self.previous.tokenType;
-
+        const operator_type = self.previous.tokenType;
         // Compile the operand
         try self.parsePrecedence(.Unary);
-
         // Emit the operator's corresponding instruction.
-        switch (operatorType) {
+        switch (operator_type) {
             .Bang => try self.emitOp(.Not),
             .Minus => try self.emitOp(.Negate),
             else => unreachable,
@@ -630,8 +631,8 @@ pub const Parser = struct {
             while (true) {
                 try self.expression();
 
-                if (arg_count == Obj.Function.MAX_ARITY) {
-                    try self.errorAtPrevious("Can't have more than {d} arguments.", .{Obj.Function.MAX_ARITY});
+                if (arg_count == Function.MAX_ARITY) {
+                    try self.errorAtPrevious("Can't have more than {d} arguments.", .{ Function.MAX_ARITY });
                 } else {
                     arg_count += 1;
                 }
@@ -646,12 +647,12 @@ pub const Parser = struct {
     }
 
     fn and_(self: *Parser) !void {
-        const endJump = try self.emitJump(.JumpIfFalse);
+        const end_jump = try self.emitJump(.JumpIfFalse);
 
         try self.emitOp(.Pop);
         try self.parsePrecedence(.And);
 
-        try self.patchJump(endJump);
+        try self.patchJump(end_jump);
     }
 
     fn expression(self: *Parser) !void {
@@ -675,8 +676,8 @@ pub const Parser = struct {
         try self.consume(.LeftParen, "Expect '(' after function name.");
         if (!self.check(.RightParen)) {
             while (true) {
-                if (self.compiler.function.arity == Obj.Function.MAX_ARITY) {
-                    try self.errorAtCurrent("Can't have more than {d} parameters.", .{Obj.Function.MAX_ARITY});
+                if (self.compiler.function.arity == Function.MAX_ARITY) {
+                    try self.errorAtCurrent("Can't have more than {d} parameters.", .{ Function.MAX_ARITY });
                 }
                 self.compiler.function.arity += 1;
                 const constant = try self.parseVariable("Expect parameter name.");
@@ -779,14 +780,14 @@ pub const Parser = struct {
             try self.expressionStatement();
         }
 
-        var loopStart = self.currentChunk().code.items.len;
-        var maybeExitJump: ?usize = null;
+        var loop_start = self.currentChunk().code.items.len;
+        var maybe_exit_jump: ?usize = null;
         if (!try self.match(.Semicolon)) {
             try self.expression();
             try self.consume(.Semicolon, "Expect ';' after loop condition.");
 
             // Jump out of the loop if the condition is false.
-            maybeExitJump = @intCast(usize, try self.emitJump(.JumpIfFalse));
+            maybe_exit_jump = @intCast(usize, try self.emitJump(.JumpIfFalse));
             try self.emitOp(.Pop);
         }
 
@@ -797,15 +798,15 @@ pub const Parser = struct {
             try self.emitOp(.Pop);
             try self.consume(.RightParen, "Expect ')' after for clauses.");
 
-            try self.emitLoop(loopStart);
-            loopStart = incrementStart;
+            try self.emitLoop(loop_start);
+            loop_start = incrementStart;
             try self.patchJump(bodyJump);
         }
 
         try self.statement();
-        try self.emitLoop(loopStart);
+        try self.emitLoop(loop_start);
 
-        if (maybeExitJump) |exitJump| {
+        if (maybe_exit_jump) |exitJump| {
             try self.patchJump(exitJump);
             try self.emitOp(.Pop);
         }
@@ -818,18 +819,18 @@ pub const Parser = struct {
         try self.expression();
         try self.consume(.RightParen, "Expect ')' after condition.");
 
-        const thenJump = try self.emitJump(.JumpIfFalse);
+        const then_jump = try self.emitJump(.JumpIfFalse);
         try self.emitOp(.Pop);
         try self.statement();
 
-        const elseJump = try self.emitJump(.Jump);
+        const else_jump = try self.emitJump(.Jump);
 
-        try self.patchJump(thenJump);
+        try self.patchJump(then_jump);
         try self.emitOp(.Pop);
 
         if (try self.match(.Else)) try self.statement();
 
-        try self.patchJump(elseJump);
+        try self.patchJump(else_jump);
     }
 
     fn printStatement(self: *Parser) !void {
@@ -860,7 +861,7 @@ pub const Parser = struct {
     }
 
     fn whileStatement(self: *Parser) !void {
-        const loopStart = self.currentChunk().code.items.len;
+        const loop_start = self.currentChunk().code.items.len;
         try self.consume(.LeftParen, "Expect '(' after 'while'.");
         try self.expression();
         try self.consume(.RightParen, "Expect ')' after condition.");
@@ -868,14 +869,14 @@ pub const Parser = struct {
         const exitJump = try self.emitJump(.JumpIfFalse);
         try self.emitOp(.Pop);
         try self.statement();
-        try self.emitLoop(loopStart);
+        try self.emitLoop(loop_start);
 
         try self.patchJump(exitJump);
         try self.emitOp(.Pop);
     }
 
     fn synchronize(self: *Parser) !void {
-        self.panicMode = false;
+        self.panic_mode = false;
 
         while (self.current.tokenType != .EOF) {
             if (self.previous.tokenType == .Semicolon) return;
@@ -898,7 +899,7 @@ pub const Parser = struct {
             try self.statement();
         }
 
-        if (self.panicMode) try self.synchronize();
+        if (self.panic_mode) try self.synchronize();
     }
 
     fn statement(self: *Parser) CompilerError!void {

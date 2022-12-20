@@ -21,11 +21,11 @@ const gpa_alloc = gpa.allocator();
 // TODO: figure out whether or not debug messages should go to stderr instead of stdout? eg it makes sense to use std.log
 // to log stuff for GC.
 pub fn main() !void {
-    if (debug_options.printCode)        std.log.info("[debug option set] Print code", .{});
-    if (debug_options.traceExecution)   std.log.info("[debug option set] Trace execution", .{});
-    if (debug_options.detectMemLeaks)   std.log.info("[debug option set] Detect compiler memory leaks option set", .{});
-    if (debug_options.logGC)            std.log.info("[debug option set] Log garbage collections", .{});
-    if (debug_options.stressGC)         std.log.info("[debug option set] Invoke GC as much as possible", .{});
+    if (debug_options.print_code)       std.log.info("[debug option set] Print code", .{});
+    if (debug_options.trace_execution)  std.log.info("[debug option set] Trace execution", .{});
+    if (debug_options.detect_mem_leaks) std.log.info("[debug option set] Detect compiler memory leaks option set", .{});
+    if (debug_options.log_gc)           std.log.info("[debug option set] Log garbage collections", .{});
+    if (debug_options.stress_gc)        std.log.info("[debug option set] Invoke GC as much as possible", .{});
     if (debug_options.all)              std.log.info("Running with all debug options set.\n", .{});
 
     // TODO: come back to this, recheck all the allocators and how they're used in this file

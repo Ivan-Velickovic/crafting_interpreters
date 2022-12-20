@@ -12,42 +12,33 @@ pub fn build(b: *std.build.Builder) void {
     const mode = b.standardReleaseOptions();
 
     var all = b.option(bool, "debug-all", "Run with all debug options set") orelse false;
-    var printCode = b.option(bool, "debug-print-code", "Print disassembled code") orelse false;
-    var traceExecution = b.option(bool, "debug-trace-exec", "Print execution trace") orelse false;
-    var detectMemLeaks = b.option(bool, "debug-detect-mem-leaks", "Detect internal compiler memory leaks") orelse false;
-    var logGC = b.option(bool, "debug-log-gc", "Log information when the GC is invoked") orelse false;
-    var stressGC = b.option(bool, "debug-stress-gc", "Invoke GC as often as possible") orelse false;
+    var print_code = b.option(bool, "debug-print-code", "Print disassembled code") orelse false;
+    var trace_execution = b.option(bool, "debug-trace-exec", "Print execution trace") orelse false;
+    var detect_mem_leaks = b.option(bool, "debug-detect-mem-leaks", "Detect internal compiler memory leaks") orelse false;
+    var log_gc = b.option(bool, "debug-log-gc", "Log information when the GC is invoked") orelse false;
+    var stress_gc = b.option(bool, "debug-stress-gc", "Invoke GC as often as possible") orelse false;
 
     const exe = b.addExecutable("zlox", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
 
-    const debugOptions = b.addOptions();
-    exe.addOptions("debug_options", debugOptions);
+    const debug_options = b.addOptions();
+    exe.addOptions("debug_options", debug_options);
 
-    debugOptions.addOption(bool, "all", all);
+    debug_options.addOption(bool, "all", all);
     // If the "all" option has been set then we set all debug sub-options to true.
     if (all) {
-        printCode = true;
-        traceExecution = true;
-        detectMemLeaks = true;
-        logGC = true;
-        stressGC = true;
+        print_code = true;
+        trace_execution = true;
+        detect_mem_leaks = true;
+        log_gc = true;
+        stress_gc = true;
     }
-    debugOptions.addOption(bool, "printCode", printCode);
-    debugOptions.addOption(bool, "traceExecution", traceExecution);
-    debugOptions.addOption(bool, "detectMemLeaks", detectMemLeaks);
-    debugOptions.addOption(bool, "logGC", logGC);
-    debugOptions.addOption(bool, "stressGC", stressGC);
+    debug_options.addOption(bool, "print_code", print_code);
+    debug_options.addOption(bool, "trace_execution", trace_execution);
+    debug_options.addOption(bool, "detect_mem_leaks", detect_mem_leaks);
+    debug_options.addOption(bool, "log_gc", log_gc);
+    debug_options.addOption(bool, "stress_gc", stress_gc);
 
     exe.install();
-
-    const run_cmd = exe.run();
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
 }
