@@ -171,12 +171,12 @@ pub const Obj = struct {
     };
 
     pub const Native = struct {
-        pub const Fn = *const fn (argCount: u8, args: []Value) Value;
+        pub const Fun = *const fn (argCount: u8, args: []Value) Value;
 
         obj: Obj,
-        function: Fn,
+        function: Fun,
 
-        pub fn create(vm: *VM, function: Fn) !*Native {
+        pub fn create(vm: *VM, function: Fun) !*Native {
             const obj = try Obj.allocate(vm, Native, .Native);
             const native = obj.asType(Native);
             native.* = Native{

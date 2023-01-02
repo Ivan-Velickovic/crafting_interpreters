@@ -8,7 +8,7 @@ pub const TokenType = enum {
     // Literals
     Identifier, String, Number,
     // Keywords
-    And, Class, Else, False, For, Fn, If, Nil, Or, Print, Return, Super, This, True, Var, While,
+    And, Class, Else, False, For, Fun, If, Nil, Or, Print, Return, Super, This, True, Var, While,
     // Other
     Error, EOF
 };
@@ -166,8 +166,7 @@ pub const Scanner = struct {
                     return switch (self.start[1]) {
                         'a' => self.checkKeyword(2, "lse", .False),
                         'o' => self.checkKeyword(2, "r", .For),
-                         // This may seem redundant but we still need to check that the whole lexeme is "fn", not just the start.
-                        'n' => self.checkKeyword(2, "", .Fn),
+                        'u' => self.checkKeyword(2, "n", .Fun),
                         else => .Identifier,
                     };
                 } else {

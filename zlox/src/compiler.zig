@@ -929,7 +929,7 @@ pub const Parser = struct {
             if (self.previous.tokenType == .Semicolon) return;
 
             switch (self.current.tokenType) {
-                .Class, .Fn, .Var, .For, .If, .While, .Print, .Return => return,
+                .Class, .Fun, .Var, .For, .If, .While, .Print, .Return => return,
                 else => try self.advance(),
             }
         }
@@ -938,7 +938,7 @@ pub const Parser = struct {
     fn declaration(self: *Parser) CompilerError!void {
         if (try self.match(.Class)) {
             try self.classDeclaration();
-        } else if (try self.match(.Fn)) {
+        } else if (try self.match(.Fun)) {
             try self.fnDeclaration();
         } else if (try self.match(.Var)) {
             try self.varDeclaration();

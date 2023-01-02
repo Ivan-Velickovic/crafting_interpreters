@@ -144,7 +144,7 @@ pub const VM = struct {
         self.resetStack();
     }
 
-    fn defineNative(self: *VM, name: []const u8, function: Native.Fn) !void {
+    fn defineNative(self: *VM, name: []const u8, function: Native.Fun) !void {
         const name_obj = &(try String.copy(self, name)).obj;
         self.stack.push(Value.fromObj(name_obj));
         const function_obj = &(try Native.create(self, function)).obj;
