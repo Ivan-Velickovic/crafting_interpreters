@@ -150,7 +150,7 @@ pub const VM = struct {
         const function_obj = &(try Native.create(self, function)).obj;
         self.stack.push(Value.fromObj(function_obj));
 
-        _ = try self.globals.set(self.stack.items[0].Obj.asType(String), self.stack.items[1]);
+        _ = try self.globals.set(self.stack.items[0].asObj().asType(String), self.stack.items[1]);
         _ = self.stack.pop();
         _ = self.stack.pop();
     }
@@ -188,19 +188,19 @@ pub const VM = struct {
     }
 
     fn callValue(self: *VM, callee: Value, arg_count: u8) !void {
-        if (callee == .Obj) {
-            switch (callee.Obj.obj_type) {
+        if (callee.isObj()) {
+            switch (callee.asObj().obj_type) {
                 .BoundMethod => {
-                    const bound_method = callee.Obj.asType(BoundMethod);
+                    const bound_method = callee.asObj().asType(BoundMethod);
                     self.stack.items[self.stack.items.len - arg_count - 1] = bound_method.receiver;
                     return try self.call(bound_method.method, arg_count);
                 },
                 .Class => {
-                    const class = callee.Obj.asType(Class);
+                    const class = callee.asObj().asType(Class);
                     const instance = try Obj.Instance.create(self, class);
                     self.stack.items[self.stack.items.len - arg_count - 1] = Value.fromObj(&instance.obj);
                     if (class.methods.get(self.init_string.?)) |initialiser| {
-                        return try self.call(initialiser.Obj.asType(Closure), arg_count);
+                        return try self.call(initialiser.asObj().asType(Closure), arg_count);
                     } else if (arg_count != 0) {
                         // If we do not find an initialiser for the class and
                         // we do not expect to get a class being called with
@@ -210,9 +210,9 @@ pub const VM = struct {
                     }
                     return;
                 },
-                .Closure => return try self.call(callee.Obj.asType(Closure), arg_count),
+                .Closure => return try self.call(callee.asObj().asType(Closure), arg_count),
                 .Native => {
-                    const native = callee.Obj.asType(Native).function;
+                    const native = callee.asObj().asType(Native).function;
                     const result = native(arg_count, self.stack.items[self.stack.items.len - arg_count..]);
 
                     self.stack.resize(self.stack.items.len - arg_count + 1);
@@ -231,7 +231,7 @@ pub const VM = struct {
 
     fn invokeFromClass(self: *VM, class: *Class, method_name: *String, arg_count: u8) !void {
         if (class.methods.get(method_name)) |method| {
-            try self.call(method.Obj.asType(Closure), arg_count);
+            try self.call(method.asObj().asType(Closure), arg_count);
         } else {
             try self.runtimeError("Undefined property '{s}'.", .{ method_name.chars });
             return InterpretError.RuntimeError;
@@ -245,7 +245,7 @@ pub const VM = struct {
             return InterpretError.RuntimeError;
         }
 
-        const instance = receiver.Obj.asType(Instance);
+        const instance = receiver.asObj().asType(Instance);
 
         // The method_name could actually be a field and not a method, so first
         // we need to check whether the field exists and if so, check if it is
@@ -264,7 +264,7 @@ pub const VM = struct {
             // implemented as a closure, from the top of the stack. We then pop off
             // the instance and then replace the top of the stack with the bound
             // method we just created.
-            const bound_method = try Obj.BoundMethod.create(self, self.peek(0), method.Obj.asType(Closure));
+            const bound_method = try Obj.BoundMethod.create(self, self.peek(0), method.asObj().asType(Closure));
             _ = self.stack.pop();
             self.stack.push(Value.fromObj(&bound_method.obj));
         } else {
@@ -320,13 +320,13 @@ pub const VM = struct {
         // stack slots and store the closure in the class's method table.
         // Finally, we pop the clousre since we no longer need it.
         const method = self.peek(0);
-        const class = self.peek(1).Obj.asType(Class);
+        const class = self.peek(1).asObj().asType(Class);
         _ = try class.methods.set(name, method);
         _ = self.stack.pop();
     }
 
     fn readString(frame: *CallFrame) *String {
-        return readConstant(frame).Obj.asType(String);
+        return readConstant(frame).asObj().asType(String);
     }
 
     fn readConstant(frame: *CallFrame) Value {
@@ -351,14 +351,14 @@ pub const VM = struct {
         const rhs = self.stack.pop();
         const lhs = self.stack.pop();
 
-        if (lhs != .Number or rhs != .Number) {
+        if (!lhs.isNumber() or !rhs.isNumber()) {
             try self.runtimeError("Operands must be numbers.", .{});
             return InterpretError.RuntimeError;
         }
 
         const result = switch (op) {
-            .Greater => lhs.Number > rhs.Number,
-            .Less => lhs.Number < rhs.Number,
+            .Greater => lhs.asNumber() > rhs.asNumber(),
+            .Less => lhs.asNumber() < rhs.asNumber(),
             else => unreachable
         };
 
@@ -369,15 +369,15 @@ pub const VM = struct {
         const rhs = self.stack.pop();
         const lhs = self.stack.pop();
 
-        if (lhs != .Number or rhs != .Number) {
+        if (!lhs.isNumber() or !rhs.isNumber()) {
             try self.runtimeError("Operands must be numbers.", .{});
             return InterpretError.RuntimeError;
         }
 
         const result = switch (op) {
-            .Subtract => lhs.Number - rhs.Number,
-            .Multiply => lhs.Number * rhs.Number,
-            .Divide => lhs.Number / rhs.Number,
+            .Subtract => lhs.asNumber() - rhs.asNumber(),
+            .Multiply => lhs.asNumber() * rhs.asNumber(),
+            .Divide => lhs.asNumber() / rhs.asNumber(),
             else => unreachable
         };
 
@@ -464,7 +464,7 @@ pub const VM = struct {
                         return InterpretError.RuntimeError;
                     }
 
-                    const instance = self.peek(0).Obj.asType(Instance);
+                    const instance = self.peek(0).asObj().asType(Instance);
                     const field_name = readString(frame);
 
                     if (instance.fields.get(field_name)) |value| {
@@ -493,7 +493,7 @@ pub const VM = struct {
                     //
                     // In addition to setting the field, the last line will
                     // print "marmite";
-                    const instance = self.peek(1).Obj.asType(Instance);
+                    const instance = self.peek(1).asObj().asType(Instance);
                     const field_name = readString(frame);
                     _ = try instance.fields.set(field_name, self.peek(0));
                     const field_value = self.stack.pop();
@@ -502,7 +502,7 @@ pub const VM = struct {
                 },
                 .GetSuper => {
                     const method_name = readString(frame);
-                    const superclass = self.stack.pop().Obj.asType(Class);
+                    const superclass = self.stack.pop().asObj().asType(Class);
 
                     try self.bindMethod(superclass, method_name);
                 },
@@ -518,9 +518,9 @@ pub const VM = struct {
                     const lhs = self.stack.pop();
 
                     if (Obj.isType(lhs, .String) and Obj.isType(rhs, .String)) {
-                        try self.concatenate(lhs.Obj.asType(String), rhs.Obj.asType(String));
-                    } else if (lhs == .Number and rhs == .Number) {
-                        self.stack.push(Value.fromNumber(lhs.Number + rhs.Number));
+                        try self.concatenate(lhs.asObj().asType(String), rhs.asObj().asType(String));
+                    } else if (lhs.isNumber() and rhs.isNumber()) {
+                        self.stack.push(Value.fromNumber(lhs.asNumber() + rhs.asNumber()));
                     } else {
                         try self.runtimeError("Operands must be two numbers or two strings.", .{});
                         return InterpretError.RuntimeError;
@@ -532,12 +532,12 @@ pub const VM = struct {
                 },
                 .Negate => {
                     const value = self.stack.pop();
-                    if (value != .Number) {
+                    if (!value.isNumber()) {
                         try self.runtimeError("Operand must be a number.", .{});
                         return InterpretError.RuntimeError;
                     }
 
-                    self.stack.push(Value.fromNumber(-value.Number));
+                    self.stack.push(Value.fromNumber(-value.asNumber()));
                 },
                 .Print => try stdout.print("{}\n", .{self.stack.pop()}),
                 .Jump => {
@@ -569,13 +569,13 @@ pub const VM = struct {
                 .SuperInvoke => {
                     const method_name = readString(frame);
                     const arg_count = readByte(frame);
-                    const superclass = self.stack.pop().Obj.asType(Class);
+                    const superclass = self.stack.pop().asObj().asType(Class);
                     try self.invokeFromClass(superclass, method_name, arg_count);
 
                     frame = &self.frames[self.frame_count - 1];
                 },
                 .Closure => {
-                    const function = readConstant(frame).Obj.asType(Function);
+                    const function = readConstant(frame).asObj().asType(Function);
                     const closure = try Closure.create(self, function);
                     self.stack.push(Value.fromObj(&closure.obj));
 
@@ -623,12 +623,12 @@ pub const VM = struct {
                         try self.runtimeError("Superclass must be a class.", .{});
                         return InterpretError.RuntimeError;
                     }
-                    const subclass = self.peek(0).Obj.asType(Class);
+                    const subclass = self.peek(0).asObj().asType(Class);
                     // We want to take all the methods from the superclass, and
                     // add it to the methods table to the subclass.
                     // TODO: won't the superclass methods override the subclass methods
                     // if there is an overlap?
-                    try superclass.Obj.asType(Class).methods.addAll(&subclass.methods);
+                    try superclass.asObj().asType(Class).methods.addAll(&subclass.methods);
                     _ = self.stack.pop(); // Pop the subclass.
                 },
                 .Method => {

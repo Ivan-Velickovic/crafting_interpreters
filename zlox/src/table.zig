@@ -57,7 +57,7 @@ pub const Table = struct {
     }
 
     fn findEntry(entries: []Entry, key: *Obj.String) *Entry {
-        var index = key.hash % entries.len;
+        var index = key.hash & (entries.len - 1);
         var tombstone: ?*Entry = null;
 
         while (true) {
@@ -66,7 +66,7 @@ pub const Table = struct {
             if (entry.key) |entryKey| {
                 if (entryKey == key) return entry;
             } else {
-                if (entry.value == .Nil) {
+                if (entry.value.isNil()) {
                     // Entry is empty.
                     return tombstone orelse entry;
                 } else {
@@ -75,14 +75,14 @@ pub const Table = struct {
                 }
             }
 
-            index = (index + 1) % entries.len;
+            index = (index + 1) & (entries.len - 1);
         }
     }
 
     pub fn findString(self: *Table, chars: []const u8, hash: usize) ?*Obj.String {
         if (self.count == 0) return null;
 
-        var index = hash % self.entries.len;
+        var index = hash & (self.entries.len - 1);
         while (true) {
             const entry = self.entries[index];
             if (entry.key) |key| {
@@ -91,10 +91,10 @@ pub const Table = struct {
                 }
             } else {
                 // Stop if we find an empty and non-tombstone entry.
-                if (entry.value == .Nil) return null;
+                if (entry.value.isNil()) return null;
             }
 
-            index = (index + 1) % self.entries.len;
+            index = (index + 1) & (self.entries.len - 1);
         }
     }
 
@@ -115,7 +115,7 @@ pub const Table = struct {
 
         const entry = findEntry(self.entries, key);
         const isNewKey = entry.key == null;
-        if (isNewKey and entry.value == .Nil) self.count += 1;
+        if (isNewKey and entry.value.isNil()) self.count += 1;
 
         entry.key = key;
         entry.value = value;

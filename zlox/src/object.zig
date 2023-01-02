@@ -55,7 +55,7 @@ pub const Obj = struct {
     }
 
     pub fn isType(value: Value, obj_type: Type) bool {
-        return value == .Obj and value.Obj.obj_type == obj_type;
+        return value.isObj() and value.asObj().obj_type == obj_type;
     }
 
     pub const Class = struct {

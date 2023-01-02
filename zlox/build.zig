@@ -18,10 +18,15 @@ pub fn build(b: *std.build.Builder) void {
     var detect_mem_leaks = b.option(bool, "debug-detect-mem-leaks", "Detect internal compiler memory leaks") orelse false;
     var log_gc = b.option(bool, "debug-log-gc", "Log information when the GC is invoked") orelse false;
     var stress_gc = b.option(bool, "debug-stress-gc", "Invoke GC as often as possible") orelse false;
+    const nan_boxing = b.option(bool, "nan-boxing", "Enable NaN-boxing optimisation in the VM") orelse false;
 
     const exe = b.addExecutable("zlox", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
+
+    const zlox_options = b.addOptions();
+    exe.addOptions("zlox_options", zlox_options);
+    zlox_options.addOption(bool, "nan_boxing", nan_boxing);
 
     const debug_options = b.addOptions();
     exe.addOptions("debug_options", debug_options);

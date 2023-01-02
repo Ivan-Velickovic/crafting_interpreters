@@ -111,7 +111,7 @@ pub const GC = struct {
 
     // TODO: put this in Value.zig/Object.zig?
     fn markValue(self: *GC, value: Value) !void {
-        if (value == .Obj) try self.markObject(value.Obj);
+        if (value.isObj()) try self.markObject(value.asObj());
     }
 
     fn markTable(self: *GC, table: *Table) !void {
